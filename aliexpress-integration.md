@@ -383,6 +383,39 @@ Pour une v2 : exporter vers Grafana Loki ou similar si Hakim veut un vrai dashbo
   - Écriture automatique des tokens dans `.env`
 - `docs/oauth-setup.md` : guide 7 étapes (callback HTTP temporaire sur VPS, ouverture/fermeture port 3000, remise HTTPS après OAuth)
 
+### 2026-04-18 — Phase 3 : Client AliExpress
+
+- `src/aliexpress_client.py` : façade async sur `python-aliexpress-api`
+  - 3 méthodes async (wrapping `asyncio.to_thread` car le SDK est sync) :
+    - `search_products(query, max_results, min_orders, min_rating, max_price_eur, sort_by, target_country)` → `get_products()` du SDK
+    - `get_product_details(product_id, include_shipping)` → `get_products_details()` du SDK
+    - `get_shipping_cost(product_id, country_code, quantity)` → **stub `NotImplementedError`** (le SDK Affiliate ne couvre pas le freight)
+  - `SORT_MAP` : mapping `"orders"|"price_asc"|"price_desc"` → `models.SortBy`
+  - `_filter_products` : filtres post-fetch pour `min_orders` / `min_rating` (l'API AE ne les supporte pas en paramètres)
+  - Conversion `max_price_eur` → cents (lowest currency denomination)
+  - Logs structurés `structlog` à chaque étape (start / done / error / not_implemented)
+  - Hiérarchie d'erreurs : `AliExpressClientError` > `ProductsNotFound`, `UpstreamError`
+  - SDK injectable via le constructeur (`AliExpressClient(config, sdk=...)`) → testable sans réseau
+
+- **Décision freight (`get_shipping_cost`) reportée à la Phase 4 :**
+  - `python-aliexpress-api` n'expose que les endpoints Affiliate, pas Drop Shipping
+  - L'endpoint `aliexpress.ds.freight.query` nécessite un appel HTTP signé brut sur la gateway IOP
+  - Implémentation cible : `httpx` + signature **HMAC-SHA256** (`sign_method=sha256`) avec l'OAuth `access_token` en system parameter — même schéma que Phase 2 OAuth (déjà validé)
+  - Le docstring du stub mentionne explicitement HMAC-SHA256 pour éviter la confusion avec MD5
+
+- **Décision over-fetch :** comportement simple, un seul appel API, peut renvoyer < `max_results` après filtrage `min_orders` / `min_rating`. TODO commenté dans le code pour pagination en Phase 4.
+
+- `tests/conftest.py` : fixtures pytest (`ae_config`, `mock_sdk`, `client`, `fake_search_products`, `fake_product_detail`)
+- `tests/fixtures/products_search.json` : 4 produits yoga avec ratings et volumes variés (1284 / 47 / 312 / 802 ventes ; 92.5% / 88% / 78.4% / 95.2%)
+- `tests/fixtures/product_details.json` : 1 produit détaillé (yoga TPE 6mm)
+- `tests/test_aliexpress_client.py` : **17 tests** couvrant :
+  - Cas nominal `search_products` (params, sort mapping paramétré, page_size cap à 50, conversion cents)
+  - Filtres `min_orders` / `min_rating` post-fetch
+  - Cas erreur `search_products` (`ProductsNotFoudException` → liste vide, `ApiRequestException` → `UpstreamError`)
+  - Cas nominal et erreurs `get_product_details` (not found → `ProductsNotFound`, upstream → `UpstreamError`)
+  - Stub `get_shipping_cost` → `NotImplementedError`
+- **17/17 tests verts en 0.04s, aucun appel réseau réel à AE**
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
