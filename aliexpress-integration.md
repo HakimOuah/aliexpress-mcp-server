@@ -364,6 +364,25 @@ Pour une v2 : exporter vers Grafana Loki ou similar si Hakim veut un vrai dashbo
 - Décision : interface Telegram uniquement, pas de dashboard web
 - Décision : pas de Redis pour le MVP, cache mémoire suffit
 
+### 2026-04-18 — Phase 1 + Phase 2
+
+**Phase 1 — Setup projet :**
+- Structure de dossiers créée (`src/`, `scripts/`, `tests/`, `docs/`)
+- `requirements.txt` avec 8 dépendances (fastmcp, python-aliexpress-api, cachetools, dotenv, flask, structlog, pytest, pytest-asyncio)
+- `.env.example` avec 30 variables (AE + DropPilot rules + MCP server)
+- `.gitignore` Python standard
+- `src/config.py` : 3 dataclasses frozen + `load_config()` typé
+- `src/models.py` : enum `Verdict` (PASS/WATCH/KILL) + dataclasses `ShippingInfo` et `Product`
+- Squelette compilé et validé
+
+**Phase 2 — OAuth one-shot :**
+- `scripts/ae_oauth.py` : flow OAuth complet avec Flask (port 3000)
+  - Signature HMAC-SHA256 conforme à l'OP API AliExpress (vérifié contre ae_sdk, ae-api, doc Lazada/IOP)
+  - `sign_method = "sha256"` confirmé correct pour la plateforme IOP
+  - `api-sg.aliexpress.com` confirmé correct pour les comptes EU (pas d'endpoint régional EU)
+  - Écriture automatique des tokens dans `.env`
+- `docs/oauth-setup.md` : guide 7 étapes (callback HTTP temporaire sur VPS, ouverture/fermeture port 3000, remise HTTPS après OAuth)
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
