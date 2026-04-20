@@ -29,9 +29,15 @@ htmlcov/
 .coverage
 tests/reports/
 
+# Live-captured IOP responses from smoke test — may contain PII / store
+# identifiers. Keep local until Phase 4 decides whether to commit
+# sanitized versions as regression fixtures.
+tests/fixtures/real_*.json
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
+docker-compose.oauth.yml
