@@ -11,8 +11,6 @@ Usage :
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
 import re
 import sys
@@ -29,12 +27,16 @@ from flask import Flask, request
 AE_AUTH_URL = "https://api-sg.aliexpress.com/oauth/authorize"
 AE_REST_URL = "https://api-sg.aliexpress.com/rest"
 TOKEN_CREATE_PATH = "/auth/token/create"
-SIGN_METHOD = "sha256"
 
 # ── Chargement config ─────────────────────────────────────────────────────────
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT_DIR / ".env"
+
+# Make `src.*` importable when running as `python scripts/ae_oauth.py`.
+sys.path.insert(0, str(ROOT_DIR))
+
+from src.iop_signature import SIGN_METHOD, sign_system_request  # noqa: E402
 
 load_dotenv(ENV_PATH)
 
@@ -50,27 +52,6 @@ if not APP_KEY or not APP_SECRET:
 if not CALLBACK_URL:
     print("ERREUR : AE_CALLBACK_URL doit être défini dans .env")
     sys.exit(1)
-
-# ── Signature HMAC-SHA256 (OP API) ───────────────────────────────────────────
-
-def sign_request(app_secret: str, api_path: str, params: dict[str, str]) -> str:
-    """Signe une requête OP API avec HMAC-SHA256.
-
-    Base string = api_path + clés/valeurs triées alphabétiquement.
-    Clé HMAC = app_secret.
-    Résultat = hex uppercase.
-    """
-    sorted_params = sorted(params.items(), key=lambda x: x[0])
-    base_string = api_path + "".join(f"{k}{v}" for k, v in sorted_params)
-
-    signature = hmac.new(
-        app_secret.encode("utf-8"),
-        base_string.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest().upper()
-
-    return signature
-
 
 # ── Échange code → tokens ────────────────────────────────────────────────────
 
@@ -89,7 +70,7 @@ def exchange_code_for_tokens(code: str) -> dict:
         "timestamp": timestamp,
     }
 
-    signature = sign_request(APP_SECRET, TOKEN_CREATE_PATH, sign_params)
+    signature = sign_system_request(APP_SECRET, TOKEN_CREATE_PATH, sign_params)
 
     # Query string = paramètres système + signature
     query = {
