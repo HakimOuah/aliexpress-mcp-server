@@ -1,0 +1,9 @@
+{
+  "error_response": {
+    "code": "27",
+    "msg": "IllegalAccessToken",
+    "sub_code": "isv.invalid-access-token",
+    "sub_msg": "The access token is invalid or expired.",
+    "request_id": "fixture-err-auth-0001"
+  }
+}

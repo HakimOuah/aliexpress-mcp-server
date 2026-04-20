@@ -1,0 +1,40 @@
+{
+  "aliexpress_ds_text_search_response": {
+    "result": {
+      "products": [
+        {
+          "product_id": "1005006123456789",
+          "_fixture_note": "PLACEHOLDER - replace with real IOP capture after first successful smoke test. Only `product_id` is asserted exactly in tests; other fields are inferred from AE's affiliate API conventions and may differ in the Drop Shipping response.",
+          "product_title": "Tapis de yoga antiderapant 6mm TPE ecologique",
+          "target_sale_price": "8.42",
+          "lastest_volume": 1284,
+          "evaluate_rate": "92.5%"
+        },
+        {
+          "product_id": "1005007987654321",
+          "product_title": "Tapis yoga premium liege naturel 4mm",
+          "target_sale_price": "23.50",
+          "lastest_volume": 47,
+          "evaluate_rate": "88.0%"
+        },
+        {
+          "product_id": "1005005111222333",
+          "product_title": "Tapis fitness epais 10mm",
+          "target_sale_price": "12.99",
+          "lastest_volume": 312,
+          "evaluate_rate": "78.4%"
+        },
+        {
+          "product_id": "1005008444555666",
+          "product_title": "Tapis yoga voyage pliable",
+          "target_sale_price": "31.00",
+          "lastest_volume": 802,
+          "evaluate_rate": "95.2%"
+        }
+      ],
+      "total_count": 4,
+      "current_page_no": 1
+    },
+    "request_id": "fixture-req-id-0001"
+  }
+}

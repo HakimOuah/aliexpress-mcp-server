@@ -1,0 +1,9 @@
+{
+  "error_response": {
+    "code": "7",
+    "msg": "FlowControlLimited",
+    "sub_code": "isp.top-flow-control-limited",
+    "sub_msg": "Too many requests, please slow down.",
+    "request_id": "fixture-err-rate-0001"
+  }
+}

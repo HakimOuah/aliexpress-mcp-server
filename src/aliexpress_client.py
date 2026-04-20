@@ -1,70 +1,138 @@
-"""Async façade around `python-aliexpress-api`.
+"""Async AliExpress Drop Shipping API client.
 
-Wraps the synchronous SDK calls inside `asyncio.to_thread`, adds structured
-logging, and re-raises SDK errors as domain-specific exceptions. No caching
-here — that lives in the layer above (Phase 4).
+Direct httpx calls to the IOP gateway (`/sync`), signed with
+HMAC-SHA256 via `src.iop_signature`. Covers the three Drop-Shipping
+endpoints we need for sourcing:
+
+    aliexpress.ds.text.search    — keyword search
+    aliexpress.ds.product.get    — product details
+    aliexpress.ds.freight.query  — shipping cost
+
+Returns **raw** payloads — normalization / scoring happens in Phase 4.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
+import time
+from collections.abc import Mapping
 from typing import Any
 
+import httpx
 import structlog
-from aliexpress_api import AliexpressApi
-from aliexpress_api import models as ae_models
-from aliexpress_api.errors import (
-    ApiRequestException,
-    ApiRequestResponseException,
-    InvalidArgumentException,
-    ProductsNotFoudException,
-)
 
 from .config import AliExpressConfig
+from .iop_signature import (
+    build_business_system_params,
+    sign_business_request,
+)
 
 log = structlog.get_logger(__name__)
 
 
+# ── Constants ────────────────────────────────────────────────────────────────
+
+IOP_BUSINESS_GATEWAY = "https://api-sg.aliexpress.com/sync"
+DEFAULT_TIMEOUT_S = 30.0
+
+METHOD_TEXT_SEARCH = "aliexpress.ds.text.search"
+METHOD_PRODUCT_GET = "aliexpress.ds.product.get"
+METHOD_FREIGHT_QUERY = "aliexpress.ds.freight.query"
+
+# Sort direction syntax for aliexpress.ds.text.search.
+# Source: Indigoiamlove/AEDropShipperPHPDemoCode/DsTextSearch.php uses
+# the comma form ("min_price,asc"), which is the most authoritative
+# public reference we have.
+#
+# If IOP returns "Invalid sortBy parameter" at runtime:
+#   1. Replace commas with underscores: "orders,desc" -> "orders_desc"
+#   2. Try legacy constant names: "orders,desc" -> "LAST_VOLUME,desc"
 SORT_MAP: dict[str, str] = {
-    "orders": ae_models.SortBy.LAST_VOLUME_DESC,
-    "orders_asc": ae_models.SortBy.LAST_VOLUME_ASC,
-    "price_asc": ae_models.SortBy.SALE_PRICE_ASC,
-    "price_desc": ae_models.SortBy.SALE_PRICE_DESC,
+    "orders": "orders,desc",
+    "price_asc": "min_price,asc",
+    "price_desc": "min_price,desc",
+    "latest": "latest,desc",
 }
 
 
-class AliExpressClientError(Exception):
-    """Base error for the client wrapper."""
+# ── Exceptions ───────────────────────────────────────────────────────────────
 
 
-class ProductsNotFound(AliExpressClientError):
-    """Raised when AE returns zero products."""
+class IOPError(Exception):
+    """Base class for all IOP client errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        ae_code: str | None = None,
+        ae_msg: str | None = None,
+        ae_sub_code: str | None = None,
+        ae_sub_msg: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.ae_code = ae_code
+        self.ae_msg = ae_msg
+        self.ae_sub_code = ae_sub_code
+        self.ae_sub_msg = ae_sub_msg
+        self.request_id = request_id
 
 
-class UpstreamError(AliExpressClientError):
-    """Raised on any other AE / network failure."""
+class IOPAuthError(IOPError):
+    """Access token expired / invalid / not provided."""
+
+
+class IOPRateLimitError(IOPError):
+    """IOP flow-control / rate limit triggered."""
+
+
+class IOPPermissionError(IOPError):
+    """App does not have permission for the endpoint (wrong app type)."""
+
+
+class IOPUpstreamError(IOPError):
+    """Any other AE-side failure (malformed response, business error, ...)."""
+
+
+class IOPNetworkError(IOPError):
+    """Transport-level failure: timeout, connection refused, DNS, TLS, ..."""
+
+
+# ── Client ───────────────────────────────────────────────────────────────────
 
 
 class AliExpressClient:
-    """Async wrapper for the AliExpress Affiliate SDK.
+    """Async façade over the AE IOP Drop Shipping endpoints.
 
-    The `sdk` argument exists so tests can inject a mock without touching
-    the network. In production it is constructed from `config`.
+    The `http_client` argument is injectable so tests can pass an
+    AsyncMock without hitting the network. In production, omit it and
+    the client provisions its own `httpx.AsyncClient` with a 30 s
+    timeout. When you do so, remember to call `close()` on the client
+    at shutdown (or use it as an async context manager).
     """
 
     def __init__(
         self,
         config: AliExpressConfig,
-        sdk: AliexpressApi | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._config = config
-        self._sdk: AliexpressApi = sdk or AliexpressApi(
-            key=config.app_key,
-            secret=config.app_secret,
-            language=config.default_language,
-            currency=config.default_currency,
-            tracking_id=config.tracking_id,
-        )
+        self._owns_http = http_client is None
+        self._http = http_client or httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S)
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if this instance owns it."""
+        if self._owns_http:
+            await self._http.aclose()
+
+    async def __aenter__(self) -> AliExpressClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.close()
+
+    # --- Public API --------------------------------------------------------
 
     async def search_products(
         self,
@@ -75,151 +143,459 @@ class AliExpressClient:
         max_price_eur: float | None = None,
         sort_by: str = "orders",
         target_country: str = "FR",
-    ) -> list[ae_models.Product]:
-        """Search affiliated products.
+    ) -> list[dict[str, Any]]:
+        """Keyword search via `aliexpress.ds.text.search`.
 
-        `min_orders` and `min_rating` are applied client-side (the SDK API
-        does not support them). `max_price_eur` is converted to the AE
-        "lowest currency denomination" (cents).
+        Returns the raw list of item dicts from IOP (not normalized).
+        `min_orders` / `min_rating` / `max_price_eur` are applied
+        client-side because the endpoint does not expose them as filters.
 
-        Warning: client-side filters (`min_orders`, `min_rating`) may reduce
-        the result count below `max_results` because we issue a single page
-        of size `max_results` and filter afterwards. TODO: implement
-        pagination for guaranteed result count.
+        Warning: client-side filters may reduce the result count below
+        `max_results` because we issue a single page of size
+        `max_results` and filter afterwards. TODO: implement pagination
+        for guaranteed result count.
         """
-        sort_value = SORT_MAP.get(sort_by, ae_models.SortBy.LAST_VOLUME_DESC)
-        # NOTE: page_size = max_results, no over-fetch. When `min_orders` or
-        # `min_rating` are set, the post-fetch filter can shrink the result
-        # below `max_results`. Acceptable for MVP. AE caps page_size at 50
-        # so over-fetch alone (without pagination) tops out at 2.5x.
-        # TODO(phase4): paginate (`page_no`) until we hit `max_results`
-        # post-filter, with a hard upper bound on the number of pages.
-        page_size = min(max(max_results, 1), 50)
-        max_sale_price_cents = (
-            int(round(max_price_eur * 100)) if max_price_eur is not None else None
-        )
+        sort_value = SORT_MAP.get(sort_by, SORT_MAP["orders"])
+        # IOP pageSize upper bound is undocumented publicly; PHP demo
+        # uses 20. Cap at 50 as a prudent default — adjust if needed.
+        page_size = max(1, min(max_results, 50))
 
-        log.info(
-            "ae.search.start",
-            query=query,
-            page_size=page_size,
-            sort=sort_value,
-            country=target_country,
+        business_params = {
+            "keyWord": query,
+            "local": "fr_FR",  # FIXME: verify on first smoke test
+            "countryCode": target_country,
+            "currency": self._config.default_currency,
+            "pageSize": str(page_size),
+            "pageIndex": "1",
+            "sortBy": sort_value,
+        }
+
+        envelope = await self._call_iop(METHOD_TEXT_SEARCH, business_params)
+        items = _extract_items(envelope)
+
+        filtered = _filter_items(
+            items,
+            min_orders=min_orders,
+            min_rating=min_rating,
             max_price_eur=max_price_eur,
-        )
-
-        try:
-            response = await asyncio.to_thread(
-                self._sdk.get_products,
-                keywords=query,
-                page_size=page_size,
-                sort=sort_value,
-                ship_to_country=target_country,
-                max_sale_price=max_sale_price_cents,
-            )
-        except ProductsNotFoudException as exc:
-            log.info("ae.search.empty", query=query, reason=str(exc))
-            return []
-        except (ApiRequestException, ApiRequestResponseException, InvalidArgumentException) as exc:
-            log.error("ae.search.upstream_error", query=query, error=str(exc))
-            raise UpstreamError(str(exc)) from exc
-
-        products: list[ae_models.Product] = list(response.products or [])
-        filtered = _filter_products(products, min_orders, min_rating)
-
-        log.info(
-            "ae.search.done",
-            query=query,
-            returned=len(products),
-            after_filter=len(filtered),
         )
         return filtered[:max_results]
 
-    async def get_product_details(
-        self,
-        product_id: str,
-        include_shipping: bool = True,
-    ) -> ae_models.Product:
-        """Fetch a single product's full detail.
+    async def get_product_details(self, product_id: str) -> dict[str, Any]:
+        """Fetch detailed product information via `aliexpress.ds.product.get`.
 
-        `include_shipping` is currently informational — the Affiliate detail
-        endpoint does not return a shipping table. Use `get_shipping_cost`
-        for that.
+        Returns the raw `result` dict (the DS_Product structure with
+        `ae_item_base_info_dto`, `ae_item_sku_info_dtos`, etc.).
         """
-        log.info(
-            "ae.product.start",
-            product_id=product_id,
-            include_shipping=include_shipping,
-        )
+        business_params = {
+            "product_id": product_id,
+            "ship_to_country": "FR",  # FIXME: parameterize in Phase 4
+            "target_currency": self._config.default_currency,
+            "target_language": self._config.default_language.lower(),
+            "remove_personal_benefit": "false",
+        }
 
-        try:
-            products = await asyncio.to_thread(
-                self._sdk.get_products_details,
-                product_ids=product_id,
+        envelope = await self._call_iop(METHOD_PRODUCT_GET, business_params)
+        result = envelope.get("result")
+        if not isinstance(result, dict):
+            raise IOPUpstreamError(
+                f"Unexpected product.get envelope shape: {envelope!r}"
             )
-        except ProductsNotFoudException as exc:
-            log.info("ae.product.not_found", product_id=product_id, reason=str(exc))
-            raise ProductsNotFound(str(exc)) from exc
-        except (ApiRequestException, ApiRequestResponseException, InvalidArgumentException) as exc:
-            log.error("ae.product.upstream_error", product_id=product_id, error=str(exc))
-            raise UpstreamError(str(exc)) from exc
-
-        if not products:
-            raise ProductsNotFound(f"Empty result for product {product_id}")
-
-        log.info("ae.product.done", product_id=product_id)
-        return products[0]
+        return result
 
     async def get_shipping_cost(
         self,
         product_id: str,
+        sku_id: str,
         country_code: str,
         quantity: int = 1,
     ) -> dict[str, Any]:
-        """Freight / shipping cost lookup.
+        """Freight lookup via `aliexpress.ds.freight.query`.
 
-        NOT IMPLEMENTED YET. The underlying SDK (`python-aliexpress-api`)
-        only exposes Affiliate endpoints; freight queries belong to the
-        Drop Shipping API (`aliexpress.ds.freight.query`) which requires a
-        raw signed HTTP call against the IOP gateway. To be implemented in
-        a follow-up phase via `httpx` + manual HMAC-SHA256 signing
-        (sign_method=sha256), with the OAuth `access_token` passed as a
-        system parameter — same scheme used by the AE / Lazada IOP SDK.
+        `sku_id` is **mandatory** — AE rejects requests without a
+        `selectedSkuId` and the error messages are opaque. Never pass
+        an arbitrary value: always source `sku_id` from a prior
+        `get_product_details` call.
+
+        Workflow::
+
+            items = await client.search_products("yoga mat")
+            details = await client.get_product_details(items[0]["product_id"])
+            sku_id = details["ae_item_sku_info_dtos"][0]["id"]  # or pick another
+            freight = await client.get_shipping_cost(
+                product_id=items[0]["product_id"],
+                sku_id=sku_id,
+                country_code="FR",
+            )
+
+        Returns the raw freight `result` dict (shipping methods list,
+        delivery time, cost).
         """
-        log.warning(
-            "ae.shipping.not_implemented",
-            product_id=product_id,
-            country=country_code,
-            quantity=quantity,
+        # The API takes a single param `queryDeliveryReq` whose value
+        # is a JSON string — not a nested object. Wrong type or missing
+        # `selectedSkuId` yields opaque errors.
+        query_req = {
+            "quantity": str(quantity),
+            "shipToCountry": country_code,
+            "productId": str(product_id),
+            "provinceCode": "",
+            "cityCode": "",
+            "selectedSkuId": str(sku_id),
+            "language": "fr_FR",  # FIXME: verify on first smoke test
+            "currency": self._config.default_currency,
+            "locale": "fr_FR",
+        }
+        business_params = {"queryDeliveryReq": json.dumps(query_req)}
+
+        envelope = await self._call_iop(METHOD_FREIGHT_QUERY, business_params)
+        result = envelope.get("result")
+        if not isinstance(result, dict):
+            raise IOPUpstreamError(
+                f"Unexpected freight.query envelope shape: {envelope!r}"
+            )
+        return result
+
+    # --- Private ----------------------------------------------------------
+
+    async def _call_iop(
+        self, method: str, business_params: Mapping[str, str]
+    ) -> dict[str, Any]:
+        """Sign + POST an IOP business request, return the inner envelope.
+
+        The inner envelope is the value of the top-level
+        `aliexpress_<method_slug>_response` key. Callers extract
+        `result` / `resp_result` from there — the nesting varies across
+        AE endpoints.
+        """
+        system_params = build_business_system_params(
+            app_key=self._config.app_key,
+            access_token=self._config.access_token,
+            method=method,
         )
-        raise NotImplementedError(
-            "get_shipping_cost requires the Drop Shipping freight endpoint, "
-            "which is not exposed by python-aliexpress-api. Implement via raw "
-            "HTTP call to aliexpress.ds.freight.query in a follow-up phase."
+        all_params = {**system_params, **business_params}
+        signature = sign_business_request(self._config.app_secret, all_params)
+        all_params["sign"] = signature
+
+        log.info("ae.iop.call", method=method, status="request")
+        start = time.monotonic()
+
+        try:
+            response = await self._http.post(
+                IOP_BUSINESS_GATEWAY,
+                data=all_params,
+                headers={
+                    "Content-Type": (
+                        "application/x-www-form-urlencoded;charset=UTF-8"
+                    ),
+                },
+            )
+        except httpx.HTTPError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.error(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="network_error",
+                error=str(exc),
+            )
+            raise IOPNetworkError(f"Network error calling {method}: {exc}") from exc
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        if response.status_code >= 500:
+            log.error(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="error",
+                http_status=response.status_code,
+            )
+            raise IOPUpstreamError(
+                f"{method} returned HTTP {response.status_code}",
+                ae_msg=response.text[:500],
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            log.error(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="error",
+                http_status=response.status_code,
+                parse_error=str(exc),
+            )
+            raise IOPUpstreamError(
+                f"{method} returned non-JSON body: {response.text[:200]!r}"
+            ) from exc
+
+        if "error_response" in body:
+            err = body["error_response"] or {}
+            request_id = err.get("request_id") or body.get("request_id")
+            exc = _classify_ae_error(err, request_id=request_id)
+            log.warning(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="error",
+                ae_code=exc.ae_code,
+                ae_msg=exc.ae_msg,
+                ae_sub_code=exc.ae_sub_code,
+                request_id=request_id,
+            )
+            raise exc
+
+        response_key = _response_key_for_method(method)
+        envelope = body.get(response_key)
+        if not isinstance(envelope, dict):
+            log.error(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="error",
+                reason="missing_response_envelope",
+                response_key=response_key,
+            )
+            raise IOPUpstreamError(
+                f"{method}: missing '{response_key}' in body: {body!r}"
+            )
+
+        # Some endpoints ship an inner rsp_code / resp_code. Non-200 → error.
+        inner_code = envelope.get("rsp_code") or envelope.get("resp_code")
+        if inner_code is not None and str(inner_code) not in ("200", "0"):
+            inner_msg = envelope.get("rsp_msg") or envelope.get("resp_msg", "")
+            request_id = envelope.get("request_id")
+            exc = _classify_ae_error(
+                {"code": inner_code, "msg": inner_msg},
+                request_id=request_id,
+            )
+            log.warning(
+                "ae.iop.call",
+                method=method,
+                duration_ms=duration_ms,
+                status="error",
+                ae_code=str(inner_code),
+                ae_msg=inner_msg,
+                request_id=request_id,
+            )
+            raise exc
+
+        log.info(
+            "ae.iop.call",
+            method=method,
+            duration_ms=duration_ms,
+            status="success",
         )
+        return envelope
 
 
-def _filter_products(
-    products: list[ae_models.Product],
+# ── Helpers (module-level, easy to unit-test) ────────────────────────────────
+
+
+def _response_key_for_method(method: str) -> str:
+    """`aliexpress.ds.text.search` → `aliexpress_ds_text_search_response`."""
+    return method.replace(".", "_") + "_response"
+
+
+# Heuristic markers for error classification. All comparisons run
+# against a lowercased haystack = code + msg + sub_code + sub_msg, so
+# every marker below must itself be lowercase. Substring match.
+# Broad by design: AE returns wildly different error strings across
+# endpoints and account types — we'd rather route a mystery "session
+# invalid" error to IOPAuthError than to the catch-all.
+_AUTH_MARKERS: tuple[str, ...] = (
+    "accesstoken",  # IllegalAccessToken, AccessTokenExpired, ...
+    "access_token",
+    "access-token",
+    "session",  # AE uses "session" as the access-token param name, so
+    # any error mentioning "session" is auth-related in this domain
+    # (InvalidSession, SessionExpired, "The session has expired", ...)
+    "invalidtoken",
+    "invalid_token",
+    "invalid token",
+    "token expired",
+    "token_expired",
+    "tokenexpired",
+    "unauthenticated",
+)
+_AUTH_CODES: frozenset[str] = frozenset({"27", "41"})
+
+_RATE_LIMIT_MARKERS: tuple[str, ...] = (
+    "flow-control",
+    "flow_control",
+    "flow control",
+    "top-flow",
+    "topflow",
+    "too many requests",
+    "toomanyrequests",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "throttl",  # throttled / throttling
+    "quota",
+    "limited",  # app_call_limited, api_call_limited, isp.call-limited
+    "exceeded",
+    "429",
+)
+_RATE_LIMIT_CODES: frozenset[str] = frozenset({"7"})
+
+_PERMISSION_MARKERS: tuple[str, ...] = (
+    "insufficientpermission",
+    "insufficient permission",
+    "insufficient_permission",
+    "permission-api",
+    "permission_api",
+    "permission not granted",
+    "permissions not granted",
+    "permission denied",
+    "permission_denied",
+    "permissiondenied",
+    "does not have permission",
+    "no permission",
+    "forbidden",
+    "access denied",
+    "access_denied",
+    "accessdenied",
+    "not authorized",
+    "not_authorized",
+    "unauthorized",
+    "api-package-user-permission",
+)
+_PERMISSION_CODES: frozenset[str] = frozenset({"15"})
+
+
+def _classify_ae_error(
+    err: Mapping[str, Any], *, request_id: str | None = None
+) -> IOPError:
+    """Map an AE error payload to a specific exception type.
+
+    Classification is tolerant: we run case-insensitive substring
+    matches against a haystack built from `code + msg + sub_code +
+    sub_msg`, and we also match on stable numeric AE codes (27, 15, 7)
+    as a cross-check. The order of checks is auth → rate limit →
+    permission → catch-all, so overlapping markers route to the most
+    specific family.
+    """
+    code = str(err.get("code") or "")
+    msg = str(err.get("msg") or "")
+    sub_code = str(err.get("sub_code") or "")
+    sub_msg = str(err.get("sub_msg") or "")
+    haystack = " ".join([code, msg, sub_code, sub_msg]).lower()
+
+    base_kwargs = dict(
+        ae_code=code or None,
+        ae_msg=msg or None,
+        ae_sub_code=sub_code or None,
+        ae_sub_msg=sub_msg or None,
+        request_id=request_id,
+    )
+    display = msg or sub_msg or code or "unknown IOP error"
+
+    if code in _AUTH_CODES or any(m in haystack for m in _AUTH_MARKERS):
+        return IOPAuthError(f"Auth error: {display}", **base_kwargs)
+    if code in _RATE_LIMIT_CODES or any(
+        m in haystack for m in _RATE_LIMIT_MARKERS
+    ):
+        return IOPRateLimitError(f"Rate limited: {display}", **base_kwargs)
+    if code in _PERMISSION_CODES or any(
+        m in haystack for m in _PERMISSION_MARKERS
+    ):
+        return IOPPermissionError(f"Permission denied: {display}", **base_kwargs)
+    return IOPUpstreamError(f"IOP error: {display}", **base_kwargs)
+
+
+def _extract_items(envelope: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull the list of items out of a text.search envelope.
+
+    The exact shape is not documented publicly. We try the most likely
+    paths and fall back to an empty list. Replace with the real path
+    after the first successful smoke test captures the shape.
+    """
+    result = envelope.get("result") or envelope.get("resp_result", {}).get("result")
+    if not isinstance(result, dict):
+        return []
+
+    # FIXME: verify on first smoke test — common AE key patterns
+    for key in ("products", "items", "product_list", "aeop_ae_product_s_d_t_os"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            # AE sometimes wraps: {"product": [...]} or {"item": [...]}
+            for inner_key in ("product", "item", "products", "items"):
+                inner = value.get(inner_key)
+                if isinstance(inner, list):
+                    return [i for i in inner if isinstance(i, dict)]
+    return []
+
+
+def _filter_items(
+    items: list[dict[str, Any]],
+    *,
     min_orders: int | None,
     min_rating: float | None,
-) -> list[ae_models.Product]:
-    """Apply post-fetch quality filters that the API doesn't expose."""
+    max_price_eur: float | None,
+) -> list[dict[str, Any]]:
+    """Apply client-side quality / price filters.
 
-    def passes(p: ae_models.Product) -> bool:
+    Field names are best-effort since the text.search response shape
+    is not publicly documented; any missing field silently fails open
+    for that specific item, never excludes it.
+    """
+
+    def passes(item: Mapping[str, Any]) -> bool:
         if min_orders is not None:
-            volume = getattr(p, "lastest_volume", 0) or 0
+            # FIXME: verify field name on first smoke test (lastest_volume
+            # is the affiliate API name; Drop Shipping may differ).
+            volume_raw = (
+                item.get("lastest_volume")
+                or item.get("orders")
+                or item.get("sale_volume")
+                or 0
+            )
+            try:
+                volume = int(volume_raw)
+            except (TypeError, ValueError):
+                volume = 0
             if volume < min_orders:
                 return False
+
         if min_rating is not None:
-            raw = getattr(p, "evaluate_rate", "") or ""
+            # FIXME: verify field name on first smoke test
+            rating_raw = (
+                item.get("evaluate_rate")
+                or item.get("rating")
+                or item.get("average_rating")
+            )
+            if rating_raw is None:
+                return True  # fail open when field missing
             try:
-                rate_pct = float(str(raw).rstrip("%"))
-            except ValueError:
-                return False
-            rating_5 = rate_pct / 20.0
+                rating_pct = float(str(rating_raw).rstrip("%"))
+            except (TypeError, ValueError):
+                return True
+            rating_5 = (
+                rating_pct / 20.0 if rating_pct > 5 else rating_pct
+            )
             if rating_5 < min_rating:
                 return False
+
+        if max_price_eur is not None:
+            # FIXME: verify field name on first smoke test
+            price_raw = (
+                item.get("target_sale_price")
+                or item.get("sale_price")
+                or item.get("price")
+            )
+            if price_raw is None:
+                return True
+            try:
+                price = float(str(price_raw))
+            except (TypeError, ValueError):
+                return True
+            if price > max_price_eur:
+                return False
+
         return True
 
-    return [p for p in products if passes(p)]
+    return [item for item in items if passes(item)]

@@ -1,0 +1,58 @@
+{
+  "aliexpress_ds_product_get_response": {
+    "result": {
+      "ae_item_base_info_dto": {
+        "product_id": 1005006123456789,
+        "category_id": 200399,
+        "subject": "Tapis de yoga antiderapant 6mm TPE ecologique - 183x61cm",
+        "currency_code": "EUR",
+        "product_status_type": "onSelling",
+        "evaluation_count": "847",
+        "avg_evaluation_rating": "4.7"
+      },
+      "ae_item_sku_info_dtos": {
+        "ae_item_sku_info_d_t_o": [
+          {
+            "id": "12000023999200390",
+            "sku_code": "SKU-BLUE-M",
+            "sku_price": "8.42",
+            "currency_code": "EUR",
+            "ipm_sku_stock": 500,
+            "sku_available_stock": 500
+          },
+          {
+            "id": "12000023999200391",
+            "sku_code": "SKU-PINK-M",
+            "sku_price": "8.42",
+            "currency_code": "EUR",
+            "ipm_sku_stock": 320,
+            "sku_available_stock": 320
+          }
+        ]
+      },
+      "ae_multimedia_info_dto": {
+        "image_urls": "https://ae01.alicdn.com/kf/yoga1.jpg;https://ae01.alicdn.com/kf/yoga1_b.jpg"
+      },
+      "logistics_info_dto": {
+        "delivery_time": 12,
+        "ship_to_country": "FR"
+      },
+      "package_info_dto": {
+        "package_length": 60,
+        "package_height": 10,
+        "package_width": 10,
+        "gross_weight": "1.2"
+      },
+      "ae_store_info": {
+        "store_id": 200001,
+        "store_name": "Yoga Supplier Store",
+        "item_as_described_rating": "4.8",
+        "communication_rating": "4.9",
+        "shipping_speed_rating": "4.7"
+      }
+    },
+    "rsp_code": "200",
+    "rsp_msg": "Call succeeds",
+    "request_id": "fixture-req-id-0002"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "error_response": {
+    "code": "11006",
+    "msg": "InvalidParameter",
+    "sub_code": "isv.invalid-parameter",
+    "sub_msg": "Parameter `keyWord` cannot be empty.",
+    "request_id": "fixture-err-generic-0001"
+  }
+}

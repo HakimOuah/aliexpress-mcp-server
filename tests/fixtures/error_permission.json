@@ -1,0 +1,9 @@
+{
+  "error_response": {
+    "code": "15",
+    "msg": "InsufficientPermission",
+    "sub_code": "isv.permission-api-package-user-permission-not-granted",
+    "sub_msg": "App does not have permission to access this api",
+    "request_id": "fixture-err-perm-0001"
+  }
+}

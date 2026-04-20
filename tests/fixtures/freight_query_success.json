@@ -1,0 +1,31 @@
+{
+  "aliexpress_ds_freight_query_response": {
+    "result": {
+      "_fixture_note": "PLACEHOLDER - aliexpress.ds.freight.query response shape is not publicly documented. Structure below is inferred from the legacy aliexpress.logistics.buyer.freight.calculate response. Replace after first successful live call.",
+      "success": true,
+      "shipping_methods": [
+        {
+          "service_name": "AliExpress Standard Shipping",
+          "estimated_delivery_time": "10-15",
+          "tracking_available": "true",
+          "freight": {
+            "amount": "4.99",
+            "cent": 499,
+            "currency_code": "EUR"
+          }
+        },
+        {
+          "service_name": "Cainiao Super Economy Global",
+          "estimated_delivery_time": "20-30",
+          "tracking_available": "true",
+          "freight": {
+            "amount": "2.50",
+            "cent": 250,
+            "currency_code": "EUR"
+          }
+        }
+      ]
+    },
+    "request_id": "fixture-req-id-0003"
+  }
+}
