@@ -253,12 +253,12 @@ async def step_text_search(
 
     first = items[0]
     print(f"  keys on [0]    : {sorted(first.keys())}")
-    print(f"  product_id     : {first.get('product_id')}")
+    print(f"  itemId         : {first.get('itemId')}")
     print(f"  sample fields:")
     for key in (
-        "product_title", "subject", "title", "target_sale_price",
-        "sale_price", "lastest_volume", "evaluate_rate",
-        "product_main_image_url", "product_detail_url",
+        "title", "itemId", "targetSalePrice", "salePriceFormat",
+        "score", "evaluateRate", "orders", "discount",
+        "itemMainPic", "itemUrl",
     ):
         if key in first:
             print(f"    {key:26s} = {truncate(first[key], 70)}")
@@ -481,9 +481,10 @@ async def main() -> int:
             items = _extract_items_permissive(search_env)
             if not items:
                 return 1
-            first_product_id = items[0].get("product_id")
+            # Real AE text.search items key is `itemId` (not `product_id`).
+            first_product_id = items[0].get("itemId") or items[0].get("product_id")
             if not first_product_id:
-                print("\n  ✗ first item has no product_id — aborting chain.")
+                print("\n  ✗ first item has no itemId — aborting chain.")
                 return 1
 
             detail_env = await step_product_get(

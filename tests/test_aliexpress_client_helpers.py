@@ -13,12 +13,16 @@ from src.aliexpress_client import (
     METHOD_PRODUCT_GET,
     METHOD_TEXT_SEARCH,
     SORT_MAP,
+    _SUCCESS_CODES,
     IOPAuthError,
     IOPError,
     IOPPermissionError,
     IOPRateLimitError,
     IOPUpstreamError,
     _classify_ae_error,
+    _parse_eur,
+    _parse_float,
+    _parse_order_count,
     _response_key_for_method,
 )
 
@@ -109,3 +113,92 @@ def test_sort_map_covers_expected_keys() -> None:
     assert set(SORT_MAP) == {"orders", "price_asc", "price_desc", "latest"}
     for value in SORT_MAP.values():
         assert "," in value, f"sort value {value!r} must use comma syntax"
+
+
+# --- success code set --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (0, True),
+        ("0", True),
+        ("00", True),
+        ("200", True),
+        (200, True),
+        ("1", False),
+        ("500", False),
+        ("error", False),
+    ],
+)
+def test_success_codes_accepts_expected_forms(raw: object, expected: bool) -> None:
+    assert (str(raw) in _SUCCESS_CODES) is expected
+
+
+# --- _parse_order_count ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("5,000+", 5000),
+        ("1000", 1000),
+        ("1,284", 1284),
+        ("10+", 10),
+        ("0", 0),
+        ("", 0),
+        (None, 0),
+        ("abc", 0),
+        ("5 000", 5000),
+        (500, 500),  # int passthrough
+        ("   5,000+   ", 5000),  # surrounding whitespace
+        ("+", 0),  # degenerate: empty after strip
+    ],
+)
+def test_parse_order_count(raw: object, expected: int) -> None:
+    assert _parse_order_count(raw) == expected
+
+
+# --- _parse_float ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("4.5", 4.5),
+        ("0", 0.0),
+        ("0.0", 0.0),
+        ("10", 10.0),
+        ("", 0.0),
+        (None, 0.0),
+        ("abc", 0.0),
+        (4.5, 4.5),  # float passthrough via str()
+        ("  4.5  ", 4.5),
+    ],
+)
+def test_parse_float(raw: object, expected: float) -> None:
+    assert _parse_float(raw) == pytest.approx(expected)
+
+
+def test_parse_float_rejects_comma_decimal() -> None:
+    """French-locale format like '4,5' is rejected — use `salePriceFormat`
+    for display, `targetSalePrice` (dotted) for math."""
+    assert _parse_float("4,5") == 0.0
+
+
+# --- _parse_eur --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("3.29", 3.29),
+        ("10", 10.0),
+        ("0", 0.0),
+        ("", 0.0),
+        (None, 0.0),
+        ("abc", 0.0),
+    ],
+)
+def test_parse_eur(raw: object, expected: float) -> None:
+    assert _parse_eur(raw) == pytest.approx(expected)

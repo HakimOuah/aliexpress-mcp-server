@@ -3,7 +3,7 @@
     "code": "00",
     "data": {
       "pageIndex": 1,
-      "pageSize": 2,
+      "pageSize": 3,
       "totalCount": 3984,
       "products": {
         "selection_search_product": [
@@ -13,7 +13,7 @@
             "salePrice": "25.76",
             "discount": "0%",
             "itemMainPic": "https://ae01.alicdn.com/kf/Se2d6a68bd60a4bae96440f5a6cf656d2O.jpg",
-            "title": "Tapis de litière pour chat avec cadeau, Double couche, imperméable",
+            "title": "Tapis de litière pour chat avec cadeau, Double couche, imperméable, pour boîte à litière pour animaux de compagnie, antidérapant, sable, lavable, tapis de lit propre, produits",
             "type": "search",
             "score": "4.5",
             "itemId": "1005006361450153",
@@ -25,7 +25,7 @@
             "salePriceFormat": "3,29€",
             "orders": "5,000+",
             "targetOriginalPrice": "9.40",
-            "itemUrl": "//www.aliexpress.com/item/1005006361450153.html?skuId=12000036893609536",
+            "itemUrl": "//www.aliexpress.com/item/1005006361450153.html?skuId=12000036893609536&pdp_ext_f=%7B%22sku_id%22%3A%2212000036893609536%22%7D?appkey=532390",
             "salePriceCurrency": "CNY"
           },
           {
@@ -34,7 +34,7 @@
             "salePrice": "31.25",
             "discount": "0%",
             "itemMainPic": "https://ae01.alicdn.com/kf/S4d15dd7a534148f5872f8c30fec47e36N.jpg",
-            "title": "3 paires de chaussettes de yoga, silicone antidérapant pur coton",
+            "title": "3 paires de chaussettes de yoga, chaussettes de longueur moyenne, pilates de fitness d'intérieur en silicone antidérapant en pur coton, chaussettes de sport pour femmes en gros",
             "type": "search",
             "score": "4.8",
             "itemId": "1005005993007395",
@@ -46,13 +46,34 @@
             "salePriceFormat": "3,99€",
             "orders": "5,000+",
             "targetOriginalPrice": "7.54",
-            "itemUrl": "//www.aliexpress.com/item/1005005993007395.html?skuId=12000035214851024",
+            "itemUrl": "//www.aliexpress.com/item/1005005993007395.html?skuId=12000035214851024&pdp_ext_f=%7B%22sku_id%22%3A%2212000035214851024%22%7D?appkey=532390",
+            "salePriceCurrency": "CNY"
+          },
+          {
+            "originalPrice": "123.81",
+            "originalPriceCurrency": "CNY",
+            "salePrice": "44.56",
+            "discount": "0%",
+            "itemMainPic": "https://ae01.alicdn.com/kf/S8844f3fffcd6457ca33a4367aec352019.jpg",
+            "title": "Tapis absorbant épais pour salle de bain, porte simple, résistant à la saleté, pour la cuisine de la maison, tapis de pied à séchage rapide, tapis d'entrée antidérapant",
+            "type": "search",
+            "score": "4.1",
+            "itemId": "1005008131052613",
+            "targetSalePrice": "5.69",
+            "cateId": "15,200033149,100003467,154002",
+            "targetOriginalPriceCurrency": "EUR",
+            "originMinPrice": "{\"thousandsChar\":\" \",\"shipToCountry\":\"FR\",\"decimalPointChar\":\",\",\"cent\":569,\"currencySymbolPosition\":\"end\",\"currencySymbol\":\"€\",\"showDecimal\":true,\"decimalStr\":\"69\",\"currencyCode\":\"EUR\",\"version\":\"V1\",\"formatPrice\":\"5,69€\",\"integerStr\":\"5\"}",
+            "evaluateRate": "83.0",
+            "salePriceFormat": "5,69€",
+            "orders": "4,000+",
+            "targetOriginalPrice": "15.81",
+            "itemUrl": "//www.aliexpress.com/item/1005008131052613.html?skuId=12000043954332046&pdp_ext_f=%7B%22sku_id%22%3A%2212000043954332046%22%7D?appkey=532390",
             "salePriceCurrency": "CNY"
           }
         ]
       }
     },
-    "request_id": "fixture-req-id-0001",
-    "_trace_id_": "fixture-trace-0001"
+    "request_id": "210142ba17766800480824100",
+    "_trace_id_": "21013cc017766800480781701e121a"
   }
 }

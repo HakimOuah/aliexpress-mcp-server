@@ -33,6 +33,9 @@ tests/reports/
 # identifiers. Keep local until Phase 4 decides whether to commit
 # sanitized versions as regression fixtures.
 tests/fixtures/real_*.json
+# Exception: the text.search capture is public data (item listings) and
+# serves as the canonical shape reference for _extract_items.
+!tests/fixtures/real_text_search_response.json
 
 # OS
 .DS_Store

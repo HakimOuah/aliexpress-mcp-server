@@ -210,21 +210,22 @@ async def test_generic_error_raises_IOPUpstreamError(
 # ---------------------------------------------------------------------------
 
 
-async def test_search_products_returns_items_with_stable_product_id(
+async def test_search_products_returns_items_with_stable_itemId(
     client: AliExpressClient, mock_http: AsyncMock
 ) -> None:
     _prime(mock_http, load_fixture("text_search_success.json"))
 
     items = await client.search_products(query="yoga mat")
 
-    assert len(items) == 4
-    # product_id is the only field asserted by exact value — it's
-    # guaranteed present across every AE API. Other fields are checked
-    # defensively below.
-    assert items[0]["product_id"] == "1005006123456789"
+    assert len(items) == 2
+    # itemId is the stable identity field in the text.search response;
+    # it's the only field asserted by exact value. Other fields are
+    # checked defensively below.
+    assert items[0]["itemId"] == "1005006361450153"
+    assert items[1]["itemId"] == "1005005993007395"
     for item in items:
-        assert "product_id" in item
-        assert isinstance(item["product_id"], (str, int))
+        assert "itemId" in item
+        assert isinstance(item["itemId"], (str, int))
 
 
 async def test_search_products_uses_page_size_equal_to_max_results(
@@ -270,16 +271,25 @@ async def test_search_products_sort_mapping(
     assert mock_http.post.call_args.kwargs["data"]["sortBy"] == expected
 
 
-async def test_search_products_filters_by_min_orders(
+async def test_search_products_filters_by_min_orders_keeps_both_when_below_threshold(
     client: AliExpressClient, mock_http: AsyncMock
 ) -> None:
     _prime(mock_http, load_fixture("text_search_success.json"))
 
-    # fixtures: lastest_volume = 1284, 47, 312, 802
-    items = await client.search_products(query="yoga", min_orders=300)
+    # fixture: both items have orders="5,000+" → parsed as 5000.
+    items = await client.search_products(query="yoga", min_orders=4000)
 
-    volumes = sorted(int(i["lastest_volume"]) for i in items)
-    assert volumes == [312, 802, 1284]
+    assert len(items) == 2
+
+
+async def test_search_products_filters_by_min_orders_drops_all_when_above_threshold(
+    client: AliExpressClient, mock_http: AsyncMock
+) -> None:
+    _prime(mock_http, load_fixture("text_search_success.json"))
+
+    items = await client.search_products(query="yoga", min_orders=10000)
+
+    assert items == []
 
 
 async def test_search_products_filters_by_min_rating(
@@ -287,10 +297,12 @@ async def test_search_products_filters_by_min_rating(
 ) -> None:
     _prime(mock_http, load_fixture("text_search_success.json"))
 
-    # evaluate_rate as %: 92.5 / 88 / 78.4 / 95.2 → /5: 4.625 / 4.4 / 3.92 / 4.76
-    items = await client.search_products(query="yoga", min_rating=4.5)
+    # fixture scores: "4.5" and "4.8" (already on 0-5 scale).
+    items = await client.search_products(query="yoga", min_rating=4.7)
 
-    assert sorted(i["evaluate_rate"] for i in items) == ["92.5%", "95.2%"]
+    assert len(items) == 1
+    assert items[0]["score"] == "4.8"
+    assert items[0]["itemId"] == "1005005993007395"
 
 
 async def test_search_products_filters_by_max_price_eur(
@@ -298,10 +310,12 @@ async def test_search_products_filters_by_max_price_eur(
 ) -> None:
     _prime(mock_http, load_fixture("text_search_success.json"))
 
-    # target_sale_price as "8.42", "23.50", "12.99", "31.00"
-    items = await client.search_products(query="yoga", max_price_eur=15.0)
+    # fixture targetSalePrice: "3.29" and "3.99".
+    items = await client.search_products(query="yoga", max_price_eur=3.5)
 
-    assert sorted(i["target_sale_price"] for i in items) == ["12.99", "8.42"]
+    assert len(items) == 1
+    assert items[0]["targetSalePrice"] == "3.29"
+    assert items[0]["itemId"] == "1005006361450153"
 
 
 async def test_search_products_truncates_to_max_results_after_filter(
@@ -309,9 +323,9 @@ async def test_search_products_truncates_to_max_results_after_filter(
 ) -> None:
     _prime(mock_http, load_fixture("text_search_success.json"))
 
-    items = await client.search_products(query="yoga", max_results=2)
+    items = await client.search_products(query="yoga", max_results=1)
 
-    assert len(items) == 2
+    assert len(items) == 1
 
 
 # ---------------------------------------------------------------------------

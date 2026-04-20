@@ -39,6 +39,12 @@ METHOD_TEXT_SEARCH = "aliexpress.ds.text.search"
 METHOD_PRODUCT_GET = "aliexpress.ds.product.get"
 METHOD_FREIGHT_QUERY = "aliexpress.ds.freight.query"
 
+# Accepted inner success codes across AE endpoints. Include both int 0
+# and the string forms — aliexpress.ds.text.search returns "00", the
+# older affiliate-style endpoints return "200", and some internal paths
+# return plain 0 / "0". We compare on str(value).
+_SUCCESS_CODES: frozenset[str] = frozenset({"0", "00", "200"})
+
 # Sort direction syntax for aliexpress.ds.text.search.
 # Source: Indigoiamlove/AEDropShipperPHPDemoCode/DsTextSearch.php uses
 # the comma form ("min_price,asc"), which is the most authoritative
@@ -361,10 +367,18 @@ class AliExpressClient:
                 f"{method}: missing '{response_key}' in body: {body!r}"
             )
 
-        # Some endpoints ship an inner rsp_code / resp_code. Non-200 → error.
-        inner_code = envelope.get("rsp_code") or envelope.get("resp_code")
-        if inner_code is not None and str(inner_code) not in ("200", "0"):
-            inner_msg = envelope.get("rsp_msg") or envelope.get("resp_msg", "")
+        # Some endpoints ship an inner success code. Names vary across
+        # endpoints (`code` for text.search, `rsp_code` for product.get,
+        # `resp_code` for category.get, no code at all for freight).
+        # Accepted success values cover both int 0 and the string forms
+        # ("0", "00", "200") that AE has been seen to return.
+        inner_code = next(
+            (envelope[k] for k in ("code", "rsp_code", "resp_code")
+             if k in envelope and envelope[k] is not None),
+            None,
+        )
+        if inner_code is not None and str(inner_code) not in _SUCCESS_CODES:
+            inner_msg = envelope.get("msg") or envelope.get("rsp_msg") or envelope.get("resp_msg", "")
             request_id = envelope.get("request_id")
             exc = _classify_ae_error(
                 {"code": inner_code, "msg": inner_msg},
@@ -508,26 +522,90 @@ def _classify_ae_error(
 def _extract_items(envelope: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Pull the list of items out of a text.search envelope.
 
-    The exact shape is not documented publicly. We try the most likely
-    paths and fall back to an empty list. Replace with the real path
-    after the first successful smoke test captures the shape.
-    """
-    result = envelope.get("result") or envelope.get("resp_result", {}).get("result")
-    if not isinstance(result, dict):
-        return []
+    Shape observed on the live API (2026-04-20):
+        envelope["data"]["products"]["selection_search_product"] -> list[dict]
 
-    # FIXME: verify on first smoke test — common AE key patterns
-    for key in ("products", "items", "product_list", "aeop_ae_product_s_d_t_os"):
-        value = result.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        if isinstance(value, dict):
-            # AE sometimes wraps: {"product": [...]} or {"item": [...]}
-            for inner_key in ("product", "item", "products", "items"):
-                inner = value.get(inner_key)
-                if isinstance(inner, list):
-                    return [i for i in inner if isinstance(i, dict)]
-    return []
+    Defensive: any missing step returns []. The item schema (field
+    names) is preserved as-is — normalization to our internal Product
+    model happens in the Phase 4 normalizer.
+    """
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        return []
+    products = data.get("products")
+    if not isinstance(products, dict):
+        return []
+    items = products.get("selection_search_product")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+# ── Field parsers for client-side filters ───────────────────────────────────
+#
+# The text.search items expose order count / rating / price as strings
+# with human-friendly formatting (e.g. "5,000+"). The helpers below
+# normalize them to numbers so filter thresholds can be compared
+# straightforwardly. Each is tolerant: empty / None / garbage input
+# yields a neutral zero, never raises.
+
+
+def _parse_order_count(raw: object) -> int:
+    """Parse AE's `orders` field. Examples:
+        "5,000+"  -> 5000
+        "1000"    -> 1000
+        "1,284"   -> 1284
+        ""        -> 0
+        None      -> 0
+        "abc"     -> 0
+    """
+    if raw is None:
+        return 0
+    text = str(raw).strip()
+    if not text:
+        return 0
+    # Strip trailing "+" and thousands separators (comma or space).
+    text = text.rstrip("+").replace(",", "").replace(" ", "")
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def _parse_float(raw: object) -> float:
+    """Parse a dotted-decimal float string. Examples:
+        "4.5"  -> 4.5
+        ""     -> 0.0
+        None   -> 0.0
+        "abc"  -> 0.0
+    """
+    if raw is None:
+        return 0.0
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _parse_eur(raw: object) -> float:
+    """Parse AE's `targetSalePrice` (EUR, dot-decimal string). Examples:
+        "3.29"  -> 3.29
+        "10"    -> 10.0
+        ""      -> 0.0
+        None    -> 0.0
+        "abc"   -> 0.0
+
+    Intentionally does NOT handle French comma-decimal ("3,29") — AE
+    exposes both formats in the response, and this parser is paired
+    with `targetSalePrice` which is always dotted. For the localized
+    form use `salePriceFormat` separately.
+    """
+    return _parse_float(raw)
 
 
 def _filter_items(
@@ -539,63 +617,22 @@ def _filter_items(
 ) -> list[dict[str, Any]]:
     """Apply client-side quality / price filters.
 
-    Field names are best-effort since the text.search response shape
-    is not publicly documented; any missing field silently fails open
-    for that specific item, never excludes it.
+    Field names mirror the live AE text.search shape:
+      * `orders`          -> order count, formatted like "5,000+"
+      * `score`           -> average rating, "4.5" style (0-5 scale)
+      * `targetSalePrice` -> price in the target currency (EUR), "3.29"
     """
 
     def passes(item: Mapping[str, Any]) -> bool:
         if min_orders is not None:
-            # FIXME: verify field name on first smoke test (lastest_volume
-            # is the affiliate API name; Drop Shipping may differ).
-            volume_raw = (
-                item.get("lastest_volume")
-                or item.get("orders")
-                or item.get("sale_volume")
-                or 0
-            )
-            try:
-                volume = int(volume_raw)
-            except (TypeError, ValueError):
-                volume = 0
-            if volume < min_orders:
+            if _parse_order_count(item.get("orders")) < min_orders:
                 return False
-
         if min_rating is not None:
-            # FIXME: verify field name on first smoke test
-            rating_raw = (
-                item.get("evaluate_rate")
-                or item.get("rating")
-                or item.get("average_rating")
-            )
-            if rating_raw is None:
-                return True  # fail open when field missing
-            try:
-                rating_pct = float(str(rating_raw).rstrip("%"))
-            except (TypeError, ValueError):
-                return True
-            rating_5 = (
-                rating_pct / 20.0 if rating_pct > 5 else rating_pct
-            )
-            if rating_5 < min_rating:
+            if _parse_float(item.get("score")) < min_rating:
                 return False
-
         if max_price_eur is not None:
-            # FIXME: verify field name on first smoke test
-            price_raw = (
-                item.get("target_sale_price")
-                or item.get("sale_price")
-                or item.get("price")
-            )
-            if price_raw is None:
-                return True
-            try:
-                price = float(str(price_raw))
-            except (TypeError, ValueError):
-                return True
-            if price > max_price_eur:
+            if _parse_eur(item.get("targetSalePrice")) > max_price_eur:
                 return False
-
         return True
 
     return [item for item in items if passes(item)]
