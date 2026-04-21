@@ -129,6 +129,7 @@ async def test_server_exposes_expected_tools() -> None:
     names = {t.name for t in tools}
     assert names == {
         "search_and_normalize",
+        "search_and_diagnose",
         "search_products_raw",
         "get_product_detail",
         "get_shipping_cost",
@@ -269,6 +270,57 @@ async def test_get_shipping_cost_returns_result_dict() -> None:
         )
     assert result.data["success"] is True
     assert "aeop_freight_calculate_result_for_buyer_dtolist" in result.data
+
+
+# ── search_and_diagnose ────────────────────────────────────────────────────
+
+
+async def test_search_and_diagnose_reports_pass_and_kill_for_same_query() -> None:
+    """Two search items: one backed by a high-price product (PASS),
+    one backed by a low-price product (KILL on offer_sale_price_min).
+    """
+    items = [
+        {"itemId": "AAA", "title": "high ticket", "orders": "5,000+", "evaluateRate": "90"},
+        {"itemId": "BBB", "title": "low ticket", "orders": "5,000+", "evaluateRate": "90"},
+    ]
+    high = _real_product_high_price()
+    low = _real_product_result()
+
+    async def product_side_effect(product_id):
+        return high if product_id == "AAA" else low
+
+    config = AliExpressConfig(
+        app_key="test", app_secret="test", access_token="test",
+        refresh_token="test", callback_url="https://example.test/cb",
+        default_language="FR", default_currency="EUR", tracking_id="default",
+    )
+    client = AliExpressClient(config=config, http_client=MagicMock())
+    client.search_products = AsyncMock(return_value=items)  # type: ignore[method-assign]
+    client.get_product_details = AsyncMock(side_effect=product_side_effect)  # type: ignore[method-assign]
+    client.get_shipping_cost = AsyncMock(return_value=FREIGHT_SUCCESS_CN)  # type: ignore[method-assign]
+    set_client_for_testing(client)
+
+    async with Client(mcp) as mcp_client:
+        result = await mcp_client.call_tool(
+            "search_and_diagnose",
+            {"query": "whatever", "max_results": 2, "target_country": "FR"},
+        )
+
+    payload = result.data
+    assert payload["query"] == "whatever"
+    assert payload["total_raw"] == 2
+    assert payload["pass_count"] == 1
+    assert payload["kill_count"] == 1
+
+    by_id = {c["product_id"]: c for c in payload["candidates"]}
+    assert by_id["AAA"]["verdict"] == "PASS"
+    assert by_id["AAA"]["failed_filters"] == []
+    assert "rating_min" in by_id["AAA"]["passed_filters"]
+
+    assert by_id["BBB"]["verdict"] == "KILL"
+    assert "offer_sale_price_min_eur" in by_id["BBB"]["failed_filters"]
+    # The diagnostic surfaces the cheapest in-stock price for scout debugging
+    assert by_id["BBB"]["offer_sale_price_eur"] == pytest.approx(5.09)
 
 
 async def test_get_shipping_cost_passes_delivery_info_empty_through() -> None:

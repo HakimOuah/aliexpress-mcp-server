@@ -16,7 +16,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-from .models import DropPilotProduct
+from .models import DropPilotProduct, ItemDiagnostic
 
 
 def serialize_product(product: DropPilotProduct) -> dict[str, Any]:
@@ -32,3 +32,25 @@ def serialize_product(product: DropPilotProduct) -> dict[str, Any]:
     if isinstance(fetched_at, datetime):
         data["fetched_at"] = fetched_at.isoformat()
     return data
+
+
+def serialize_diagnostic(diag: ItemDiagnostic) -> dict[str, Any]:
+    """Convert an `ItemDiagnostic` into a JSON-ready dict.
+
+    Deliberately excludes the embedded `product` payload: this
+    serializer is used by `search_and_diagnose`, whose purpose is
+    concise calibration output (hundreds of bytes per candidate).
+    Callers who need the full product for PASS items should call
+    `search_and_normalize` instead.
+    """
+    return {
+        "product_id": diag.product_id,
+        "title": diag.title,
+        "verdict": diag.verdict,
+        "passed_filters": list(diag.passed_filters),
+        "failed_filters": list(diag.failed_filters),
+        "offer_sale_price_eur": diag.offer_sale_price_eur,
+        "rating": diag.rating,
+        "order_count": diag.order_count,
+        "store_ratings": dict(diag.store_ratings) if diag.store_ratings is not None else None,
+    }

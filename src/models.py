@@ -131,3 +131,34 @@ class DropPilotProduct:
 
     # Méta
     fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class ItemDiagnostic:
+    """Result of running one text.search item through the passe-1
+    evaluator. Used by `search_and_diagnose` to calibrate filter
+    thresholds against the real AE catalog.
+
+    * `verdict` is either ``"PASS"`` (every applicable filter passed —
+      `product` is populated) or ``"KILL"`` (at least one filter failed
+      or evaluation couldn't complete — `product` is ``None``).
+    * `passed_filters` / `failed_filters` are disjoint; a filter only
+      appears in one of them, and is absent from both when it couldn't
+      be evaluated (e.g. downstream of a hard failure like "no SKU in
+      stock" or "product.get raised").
+    """
+
+    product_id: str
+    title: str
+    verdict: str
+    passed_filters: list[str]
+    failed_filters: list[str]
+
+    # Scanned metadata — None when the pipeline couldn't gather the value.
+    offer_sale_price_eur: float | None
+    rating: float | None
+    order_count: int | None
+    store_ratings: dict[str, float] | None
+
+    # Full product, populated only when verdict == "PASS".
+    product: DropPilotProduct | None

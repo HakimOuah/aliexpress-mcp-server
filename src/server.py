@@ -44,8 +44,8 @@ from .aliexpress_client import (
     IOPUpstreamError,
 )
 from .config import AppConfig, load_config
-from .normalizer import normalize_search_results
-from .serializers import serialize_product
+from .normalizer import diagnose_search_results, normalize_search_results
+from .serializers import serialize_diagnostic, serialize_product
 
 log = structlog.get_logger(__name__)
 
@@ -224,6 +224,103 @@ async def search_and_normalize(
     except IOPError as exc:
         _tool_log_done(
             "search_and_normalize", start,
+            status="error", error=_format_iop_error(exc),
+        )
+        raise RuntimeError(_format_iop_error(exc)) from exc
+
+
+@mcp.tool
+async def search_and_diagnose(
+    query: str,
+    max_results: int = 20,
+    target_country: str = "FR",
+) -> dict[str, Any]:
+    """Diagnostic variant of `search_and_normalize`.
+
+    Returns every candidate text.search returned, PASS or KILL,
+    annotated with the list of passe-1 filters it passed and failed.
+    Use this to calibrate filter thresholds against the real AE
+    catalog when `search_and_normalize` returns too few (or zero)
+    products — you can see immediately which rule is cutting
+    candidates.
+
+    More expensive than `search_and_normalize`: runs freight.query on
+    every candidate instead of short-circuiting on the first failed
+    filter. Use sparingly.
+
+    Args:
+        query: search keywords (same as `search_and_normalize`).
+        max_results: how many raw text.search items to evaluate.
+        target_country: ISO country code (FR, BE, CH, LU).
+
+    Returns:
+        A dict with::
+
+            {
+                "query": str,
+                "target_country": str,
+                "total_raw": int,      # items returned by text.search
+                "pass_count": int,     # survived every filter
+                "kill_count": int,     # failed at least one
+                "candidates": [
+                    {
+                        "product_id": str,
+                        "title": str,
+                        "verdict": "PASS" | "KILL",
+                        "passed_filters": [str, ...],
+                        "failed_filters": [str, ...],
+                        "offer_sale_price_eur": float | None,
+                        "rating": float | None,
+                        "order_count": int | None,
+                        "store_ratings": {
+                            "shipping": float,
+                            "communication": float,
+                            "as_described": float,
+                        } | None,
+                    },
+                    ...
+                ],
+            }
+    """
+    start = _tool_log_start(
+        "search_and_diagnose",
+        query=query,
+        max_results=max_results,
+        target_country=target_country,
+    )
+    try:
+        client = await _get_client()
+        raw_items = await client.search_products(
+            query=query,
+            max_results=max_results,
+            target_country=target_country,
+            sort_by="orders",
+        )
+        diagnostics = await diagnose_search_results(
+            client=client,
+            raw_items=raw_items,
+            target_country=target_country,
+        )
+        pass_count = sum(1 for d in diagnostics if d.verdict == "PASS")
+        kill_count = len(diagnostics) - pass_count
+        payload = {
+            "query": query,
+            "target_country": target_country,
+            "total_raw": len(raw_items),
+            "pass_count": pass_count,
+            "kill_count": kill_count,
+            "candidates": [serialize_diagnostic(d) for d in diagnostics],
+        }
+        _tool_log_done(
+            "search_and_diagnose", start,
+            raw_count=len(raw_items),
+            pass_count=pass_count,
+            kill_count=kill_count,
+        )
+        return payload
+    except IOPError as exc:
+        _tool_log_done(
+            "search_and_diagnose", start,
             status="error", error=_format_iop_error(exc),
         )
         raise RuntimeError(_format_iop_error(exc)) from exc

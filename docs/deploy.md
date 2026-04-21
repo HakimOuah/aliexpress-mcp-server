@@ -106,6 +106,52 @@ docker exec -e MCP_QUERY="aspirateur robot" aliexpress-mcp \
 
 Exit codes du script : `0` OK, `1` tools manquants, `2` AE renvoie 0 item, `3` filtres coupent tout, `4` exception inattendue.
 
+### Diagnostiquer quand le smoke test exit 3 (0 produit PASS)
+
+Si tous les candidats sont éliminés par les filtres, appeler le tool `search_and_diagnose` depuis le container pour voir **exactement** quel filtre tue chaque produit. Utile pour calibrer les seuils face au vrai catalogue AE.
+
+```bash
+docker exec aliexpress-mcp python -c "
+import asyncio, json
+from fastmcp import Client
+
+async def main():
+    async with Client('http://127.0.0.1:8080/mcp') as c:
+        r = await c.call_tool('search_and_diagnose', {
+            'query': 'aspirateur robot',
+            'max_results': 20,
+            'target_country': 'FR',
+        })
+        print(json.dumps(r.data, indent=2, ensure_ascii=False))
+
+asyncio.run(main())
+"
+```
+
+La sortie liste chaque candidat avec son `verdict` (`PASS` ou `KILL`), sa `failed_filters` (vide si PASS), et les valeurs scannées (`rating`, `order_count`, `offer_sale_price_eur`, `store_ratings`). Exemple :
+
+```json
+{
+  "query": "aspirateur robot",
+  "total_raw": 20,
+  "pass_count": 0,
+  "kill_count": 20,
+  "candidates": [
+    {
+      "product_id": "1005...",
+      "verdict": "KILL",
+      "failed_filters": ["store_communication_rating_min", "max_weight_kg"],
+      "passed_filters": ["rating_min", "orders_min", ...],
+      "rating": 4.7,
+      "offer_sale_price_eur": 28.50,
+      "store_ratings": {"shipping": 4.6, "communication": 4.3, "as_described": 4.6}
+    }
+  ]
+}
+```
+
+`search_and_diagnose` est plus coûteux que `search_and_normalize` (il force un `freight.query` sur chaque candidat pour évaluer tous les filtres, pas juste jusqu'au premier échec). À utiliser ponctuellement pour la calibration, pas en production.
+
 ### Option B — valider la connectivité depuis Hermès (DNS inter-container)
 
 Le script Python n'est pas copié dans l'image Hermès, et le dupliquer juste pour ce test ajoute une dette inutile. Pour valider que Hermès atteint bien `aliexpress-mcp:8080` via le DNS Docker, on fait un simple `curl` — suffisant pour prouver que la Phase 8 pourra joindre le serveur. Voir la section suivante.

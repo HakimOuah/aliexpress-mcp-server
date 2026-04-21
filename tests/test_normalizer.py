@@ -22,6 +22,7 @@ from src.config import AliExpressConfig
 from src.models import DropPilotProduct
 from src.normalizer import (
     EU_COUNTRIES,
+    diagnose_search_results,
     normalize_search_results,
 )
 
@@ -434,6 +435,112 @@ async def test_sku_ref_is_cheapest_absolute_false_when_cheapest_is_oos() -> None
 async def test_pipeline_on_empty_list() -> None:
     client = _make_client()
     assert await normalize_search_results(client, []) == []
+
+
+# ── diagnose_search_results ────────────────────────────────────────────────
+
+
+async def test_diagnose_reports_rating_min_failure_on_low_rated_product() -> None:
+    """Core regression: a product with rating 4.3 must be classified
+    KILL with `failed_filters = ['rating_min']` (plus possibly other
+    downstream failures picked up by the full-diagnosis traversal)."""
+    product = _product_with_mutated_base(avg_evaluation_rating="4.3")
+    client = _make_client(product_result=product)
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "rating_min" in diag.failed_filters
+    # rating is surfaced so the operator can see the actual value
+    assert diag.rating == pytest.approx(4.3)
+    # Other base filters that DID pass are recorded for contrast
+    assert "orders_min" in diag.passed_filters
+    assert "store_shipping_rating_min" in diag.passed_filters
+
+
+async def test_diagnose_collects_all_failed_filters_not_just_first() -> None:
+    """With `early_exit=False`, the diagnostic must keep checking
+    downstream filters even after an earlier one fails."""
+    # Rating 4.3 KILLs, AND package weight 5.0 KILLs, AND store
+    # communication 4.3 KILLs. We want all three reported.
+    product = _real_product_high_price()
+    product["ae_item_base_info_dto"]["avg_evaluation_rating"] = "4.3"
+    product["ae_store_info"]["communication_rating"] = "4.3"
+    product["package_info_dto"]["gross_weight"] = "5.0"
+    client = _make_client(product_result=product)
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "rating_min" in diag.failed_filters
+    assert "store_communication_rating_min" in diag.failed_filters
+    assert "max_weight_kg" in diag.failed_filters
+
+
+async def test_diagnose_pass_path_returns_product() -> None:
+    client = _make_client(product_result=_real_product_high_price())
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "PASS"
+    assert diag.failed_filters == []
+    assert diag.product is not None
+    assert diag.product.sku_ref.sku_id == "12000044126059464"
+
+
+async def test_diagnose_kill_on_missing_itemId() -> None:
+    client = _make_client()
+    items = [{"title": "no id", "orders": "5,000+"}]  # no itemId
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "missing_itemId" in diag.failed_filters
+
+
+async def test_diagnose_kill_on_product_get_failure() -> None:
+    client = _make_client(product_exc=ValueError("boom"))  # not IOPError → escapes
+    # Actually we only handle IOPError; non-IOP exceptions would bubble.
+    # Switch to IOPError for the correct test:
+    from src.aliexpress_client import IOPUpstreamError
+    client = _make_client(product_exc=IOPUpstreamError("boom"))
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "product_get_failed" in diag.failed_filters
+
+
+async def test_diagnose_kill_on_no_sku_in_stock() -> None:
+    product = _real_product_high_price()
+    for sku in product["ae_item_sku_info_dtos"]["ae_item_sku_info_d_t_o"]:
+        sku["sku_available_stock"] = 0
+    client = _make_client(product_result=product)
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "min_stock_ref_sku" in diag.failed_filters
+    # Base filters still evaluated and passed — surfaced for the operator
+    assert "rating_min" in diag.passed_filters
+
+
+async def test_diagnose_surfaces_store_ratings_even_on_kill() -> None:
+    product = _product_with_mutated_store(shipping_speed_rating="4.2")
+    client = _make_client(product_result=product)
+    items = _real_search_items()[:1]
+
+    [diag] = await diagnose_search_results(client, items, target_country="FR")
+
+    assert diag.verdict == "KILL"
+    assert "store_shipping_rating_min" in diag.failed_filters
+    assert diag.store_ratings is not None
+    assert diag.store_ratings["shipping"] == pytest.approx(4.2)
 
 
 async def test_pipeline_parallelizes_processing() -> None:

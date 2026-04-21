@@ -33,6 +33,7 @@ from .aliexpress_client import (
 )
 from .models import (
     DropPilotProduct,
+    ItemDiagnostic,
     PackageInfo,
     ShippingInfo,
     SkuRef,
@@ -342,98 +343,6 @@ def _build_shipping_info(
     )
 
 
-# ── Filter application — raise FilterRejection to abort a product ──────────
-
-
-class FilterRejection(Exception):
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-def _apply_base_filters(
-    rating: float, order_count: int, store: StoreInfo
-) -> list[str]:
-    passed: list[str] = []
-    if rating < FILTERS_PASSE_1["rating_min"]:
-        raise FilterRejection(
-            f"rating {rating} < {FILTERS_PASSE_1['rating_min']}"
-        )
-    passed.append("rating_min")
-    if order_count < FILTERS_PASSE_1["orders_min"]:
-        raise FilterRejection(
-            f"orders {order_count} < {FILTERS_PASSE_1['orders_min']}"
-        )
-    passed.append("orders_min")
-    if store.shipping_speed_rating < FILTERS_PASSE_1["store_shipping_rating_min"]:
-        raise FilterRejection(
-            f"store.shipping_speed {store.shipping_speed_rating} "
-            f"< {FILTERS_PASSE_1['store_shipping_rating_min']}"
-        )
-    passed.append("store_shipping_rating_min")
-    if store.communication_rating < FILTERS_PASSE_1["store_communication_rating_min"]:
-        raise FilterRejection(
-            f"store.communication {store.communication_rating} "
-            f"< {FILTERS_PASSE_1['store_communication_rating_min']}"
-        )
-    passed.append("store_communication_rating_min")
-    if store.item_as_described_rating < FILTERS_PASSE_1["store_as_described_rating_min"]:
-        raise FilterRejection(
-            f"store.as_described {store.item_as_described_rating} "
-            f"< {FILTERS_PASSE_1['store_as_described_rating_min']}"
-        )
-    passed.append("store_as_described_rating_min")
-    return passed
-
-
-def _apply_sku_price_filter(sku_ref: SkuRef, passed: list[str]) -> list[str]:
-    """High-ticket strategy: reject products whose cheapest in-stock SKU
-    is below the €25 floor (it cannot credibly multiply to €200+)."""
-    floor = FILTERS_PASSE_1["offer_sale_price_min_eur"]
-    if sku_ref.offer_sale_price_eur < floor:
-        raise FilterRejection(
-            f"offer_sale_price {sku_ref.offer_sale_price_eur}€ < {floor}€ "
-            f"(high-ticket floor)"
-        )
-    passed.append("offer_sale_price_min_eur")
-    return passed
-
-
-def _apply_package_filters(
-    package: PackageInfo | None, passed: list[str]
-) -> list[str]:
-    """When AE omits dimensions, pass-through (package is optional info)."""
-    if package is None:
-        return passed
-    if package.weight_kg > FILTERS_PASSE_1["max_weight_kg"]:
-        raise FilterRejection(
-            f"weight {package.weight_kg}kg > {FILTERS_PASSE_1['max_weight_kg']}kg"
-        )
-    passed.append("max_weight_kg")
-    max_dim = max(package.length_cm, package.width_cm, package.height_cm)
-    if max_dim > FILTERS_PASSE_1["max_length_cm"]:
-        raise FilterRejection(
-            f"max dim {max_dim}cm > {FILTERS_PASSE_1['max_length_cm']}cm"
-        )
-    passed.append("max_length_cm")
-    return passed
-
-
-def _apply_shipping_filters(
-    shipping: ShippingInfo | None, passed: list[str]
-) -> list[str]:
-    if shipping is None:
-        raise FilterRejection("shipping to target country unavailable")
-    passed.append("shipping_fr_available")
-    if shipping.max_delivery_days > FILTERS_PASSE_1["max_delivery_days"]:
-        raise FilterRejection(
-            f"max_delivery_days {shipping.max_delivery_days} "
-            f"> {FILTERS_PASSE_1['max_delivery_days']}"
-        )
-    passed.append("max_delivery_days")
-    return passed
-
-
 # ── Main pipeline ───────────────────────────────────────────────────────────
 
 
@@ -445,32 +354,118 @@ async def normalize_search_results(
     """Enrich & filter a list of text.search items.
 
     For each item: fetch product details + freight, apply passe-1
-    filters, keep only the products that pass every filter. The
-    parallelism is capped at `CONCURRENCY_LIMIT` concurrent per-item
-    chains to avoid tripping AE rate limits.
+    filters, keep only the products that pass every filter. Uses
+    the fast-fail evaluator (`early_exit=True`) — if a cheap filter
+    (rating, store, ...) already rejects, we don't pay the cost of a
+    freight.query for that item.
     """
+    diagnostics = await _run_evaluations(
+        client, raw_items, target_country, early_exit=True,
+    )
+    return [d.product for d in diagnostics if d.product is not None]
+
+
+async def diagnose_search_results(
+    client: AliExpressClient,
+    raw_items: list[dict[str, Any]],
+    target_country: str = "FR",
+) -> list[ItemDiagnostic]:
+    """Full-diagnosis variant of `normalize_search_results`.
+
+    Returns one `ItemDiagnostic` per input item, PASS or KILL, with
+    every passed/failed filter recorded. Useful to calibrate filter
+    thresholds: the scout (or the operator) can see exactly which
+    rule is cutting candidates.
+
+    More expensive than `normalize_search_results`: runs
+    freight.query on every candidate even when base filters already
+    failed, so all applicable filters are evaluated.
+    """
+    return await _run_evaluations(
+        client, raw_items, target_country, early_exit=False,
+    )
+
+
+async def _run_evaluations(
+    client: AliExpressClient,
+    raw_items: list[dict[str, Any]],
+    target_country: str,
+    *,
+    early_exit: bool,
+) -> list[ItemDiagnostic]:
     if not raw_items:
         return []
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-    async def process(item: dict[str, Any]) -> DropPilotProduct | None:
+    async def process(item: dict[str, Any]) -> ItemDiagnostic:
         async with semaphore:
-            return await _process_item(client, item, target_country)
+            return await _evaluate_item(
+                client, item, target_country, early_exit=early_exit,
+            )
 
-    results = await asyncio.gather(*(process(it) for it in raw_items))
-    return [r for r in results if r is not None]
+    return list(await asyncio.gather(*(process(it) for it in raw_items)))
 
 
-async def _process_item(
+def _diagnostic(
+    *,
+    product_id: str,
+    title: str,
+    passed: list[str],
+    failed: list[str],
+    offer_sale_price_eur: float | None,
+    rating: float | None,
+    order_count: int | None,
+    store_ratings: dict[str, float] | None,
+    product: DropPilotProduct | None,
+) -> ItemDiagnostic:
+    verdict = "PASS" if product is not None else "KILL"
+    return ItemDiagnostic(
+        product_id=product_id,
+        title=title,
+        verdict=verdict,
+        passed_filters=list(passed),
+        failed_filters=list(failed),
+        offer_sale_price_eur=offer_sale_price_eur,
+        rating=rating,
+        order_count=order_count,
+        store_ratings=store_ratings,
+        product=product,
+    )
+
+
+def _check(cond: bool, name: str, passed: list[str], failed: list[str]) -> bool:
+    """Append `name` to `passed` or `failed` based on `cond`, return `cond`."""
+    (passed if cond else failed).append(name)
+    return cond
+
+
+async def _evaluate_item(
     client: AliExpressClient,
     search_item: dict[str, Any],
     target_country: str,
-) -> DropPilotProduct | None:
+    *,
+    early_exit: bool,
+) -> ItemDiagnostic:
+    """Run the full passe-1 evaluator on one text.search item.
+
+    `early_exit=True` short-circuits on the first failed filter to
+    save API calls (used by `normalize_search_results` in production).
+    `early_exit=False` keeps going so the diagnostic reports every
+    filter that would have failed (used by `search_and_diagnose`).
+    """
     product_id = str(search_item.get("itemId") or "")
+    title = str(search_item.get("title") or "")
+    passed: list[str] = []
+    failed: list[str] = []
+
     if not product_id:
-        log.debug("normalizer.skip", reason="missing itemId")
-        return None
+        failed.append("missing_itemId")
+        return _diagnostic(
+            product_id="", title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=None, rating=None, order_count=None,
+            store_ratings=None, product=None,
+        )
 
     # ── 1. product.get ──────────────────────────────────────────────
     try:
@@ -482,7 +477,12 @@ async def _process_item(
             stage="product.get",
             reason=str(exc),
         )
-        return None
+        failed.append("product_get_failed")
+        return _diagnostic(
+            product_id=product_id, title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=None, rating=None, order_count=None,
+            store_ratings=None, product=None,
+        )
 
     base = details.get("ae_item_base_info_dto") or {}
     rating = _parse_float(base.get("avg_evaluation_rating"))
@@ -491,14 +491,39 @@ async def _process_item(
     )
     evaluation_count = _parse_int_safe(base.get("evaluation_count"))
     store = _build_store_info(details.get("ae_store_info"))
+    store_ratings = {
+        "shipping": store.shipping_speed_rating,
+        "communication": store.communication_rating,
+        "as_described": store.item_as_described_rating,
+    }
 
-    try:
-        passed = _apply_base_filters(rating, order_count, store)
-    except FilterRejection as rej:
-        log.debug("normalizer.kill", product_id=product_id, reason=rej.reason)
-        return None
+    def kill() -> ItemDiagnostic:
+        """Return a KILL diagnostic with the metadata gathered so far."""
+        return _diagnostic(
+            product_id=product_id, title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=None, rating=rating, order_count=order_count,
+            store_ratings=store_ratings, product=None,
+        )
 
-    # ── 2. SKUs ─────────────────────────────────────────────────────
+    # ── 2. Base filters (rating / orders / store ratings) ──────────
+    _check(rating >= FILTERS_PASSE_1["rating_min"], "rating_min", passed, failed)
+    _check(order_count >= FILTERS_PASSE_1["orders_min"], "orders_min", passed, failed)
+    _check(
+        store.shipping_speed_rating >= FILTERS_PASSE_1["store_shipping_rating_min"],
+        "store_shipping_rating_min", passed, failed,
+    )
+    _check(
+        store.communication_rating >= FILTERS_PASSE_1["store_communication_rating_min"],
+        "store_communication_rating_min", passed, failed,
+    )
+    _check(
+        store.item_as_described_rating >= FILTERS_PASSE_1["store_as_described_rating_min"],
+        "store_as_described_rating_min", passed, failed,
+    )
+    if failed and early_exit:
+        return kill()
+
+    # ── 3. SKU selection ───────────────────────────────────────────
     sku_wrapper = details.get("ae_item_sku_info_dtos") or {}
     if isinstance(sku_wrapper, dict):
         raw_skus = sku_wrapper.get("ae_item_sku_info_d_t_o") or []
@@ -513,37 +538,52 @@ async def _process_item(
 
     sku_ref = _select_cheapest_in_stock(all_skus)
     if sku_ref is None:
-        log.debug(
-            "normalizer.kill",
-            product_id=product_id,
-            reason="no SKU in stock",
-        )
-        return None
+        failed.append("min_stock_ref_sku")
+        # Can't evaluate price / package / shipping without a SKU — stop here.
+        return kill()
     passed.append("min_stock_ref_sku")
     sku_ref_is_cheapest = _is_cheapest_absolute(sku_ref, all_skus)
+    offer_price = sku_ref.offer_sale_price_eur
 
-    # ── 3. SKU price floor (high-ticket strategy) ───────────────────
-    try:
-        passed = _apply_sku_price_filter(sku_ref, passed)
-    except FilterRejection as rej:
-        log.debug("normalizer.kill", product_id=product_id, reason=rej.reason)
-        return None
+    # ── 4. SKU price floor (high-ticket strategy) ─────────────────
+    _check(
+        offer_price >= FILTERS_PASSE_1["offer_sale_price_min_eur"],
+        "offer_sale_price_min_eur", passed, failed,
+    )
+    if failed and early_exit:
+        return _diagnostic(
+            product_id=product_id, title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=offer_price, rating=rating, order_count=order_count,
+            store_ratings=store_ratings, product=None,
+        )
 
-    # ── 4. Package filters ──────────────────────────────────────────
+    # ── 5. Package filters ─────────────────────────────────────────
     package = _build_package(details.get("package_info_dto"))
-    try:
-        passed = _apply_package_filters(package, passed)
-    except FilterRejection as rej:
-        log.debug("normalizer.kill", product_id=product_id, reason=rej.reason)
-        return None
+    if package is not None:
+        _check(
+            package.weight_kg <= FILTERS_PASSE_1["max_weight_kg"],
+            "max_weight_kg", passed, failed,
+        )
+        max_dim = max(package.length_cm, package.width_cm, package.height_cm)
+        _check(
+            max_dim <= FILTERS_PASSE_1["max_length_cm"],
+            "max_length_cm", passed, failed,
+        )
+        if failed and early_exit:
+            return _diagnostic(
+                product_id=product_id, title=title, passed=passed, failed=failed,
+                offer_sale_price_eur=offer_price, rating=rating, order_count=order_count,
+                store_ratings=store_ratings, product=None,
+            )
 
-    # ── 5. freight.query ────────────────────────────────────────────
+    # ── 6. freight.query ───────────────────────────────────────────
     try:
         freight_result = await client.get_shipping_cost(
             product_id=product_id,
             sku_id=sku_ref.sku_id,
             country_code=target_country,
         )
+        shipping = _build_shipping_info(freight_result, target_country)
     except IOPError as exc:
         log.debug(
             "normalizer.kill",
@@ -551,16 +591,29 @@ async def _process_item(
             stage="freight.query",
             reason=str(exc),
         )
-        return None
+        shipping = None
 
-    shipping = _build_shipping_info(freight_result, target_country)
-    try:
-        passed = _apply_shipping_filters(shipping, passed)
-    except FilterRejection as rej:
-        log.debug("normalizer.kill", product_id=product_id, reason=rej.reason)
-        return None
+    if shipping is None:
+        failed.append("shipping_fr_available")
+        return _diagnostic(
+            product_id=product_id, title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=offer_price, rating=rating, order_count=order_count,
+            store_ratings=store_ratings, product=None,
+        )
+    passed.append("shipping_fr_available")
+    _check(
+        shipping.max_delivery_days <= FILTERS_PASSE_1["max_delivery_days"],
+        "max_delivery_days", passed, failed,
+    )
 
-    # ── 6. Build the final product ─────────────────────────────────
+    # ── 7. Build the final product (only if everything passed) ────
+    if failed:
+        return _diagnostic(
+            product_id=product_id, title=title, passed=passed, failed=failed,
+            offer_sale_price_eur=offer_price, rating=rating, order_count=order_count,
+            store_ratings=store_ratings, product=None,
+        )
+
     multimedia = details.get("ae_multimedia_info_dto") or {}
     product = DropPilotProduct(
         product_id=product_id,
@@ -591,4 +644,8 @@ async def _process_item(
         passed=len(passed),
         price_eur=sku_ref.offer_sale_price_eur,
     )
-    return product
+    return _diagnostic(
+        product_id=product_id, title=product.title, passed=passed, failed=failed,
+        offer_sale_price_eur=offer_price, rating=rating, order_count=order_count,
+        store_ratings=store_ratings, product=product,
+    )
