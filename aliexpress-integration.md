@@ -639,6 +639,51 @@ Utiliser `id` à la place de `sku_id` déclenche silencieusement `code: 501, msg
 - Healthcheck Docker (attendre de pinner l'endpoint santé MCP standard)
 - Cache TTL `cachetools` (toujours YAGNI — on ajoute si smoke test révèle latence)
 
+### 2026-04-21 — Phase 6 : Configuration de déploiement VPS
+
+**Objectif** : préparer le déploiement du serveur MCP sur le VPS Hostinger, à côté de Hermès, avec une procédure reproductible et un smoke test live.
+
+**Pas d'exécution automatisée cette phase** : pas d'accès SSH Mac → VPS configuré encore. Toute exécution se fera depuis le terminal Hostinger avec copier-coller des sorties.
+
+**Décisions structurantes** :
+
+1. **Healthcheck TCP plutôt que HTTP** : un `GET /mcp` sur FastMCP v3 peut renvoyer 200, 400, 405 selon la version — imprévisible à l'avance. Un simple `socket.connect(('127.0.0.1', 8080))` est plus fiable : si le port écoute, le serveur tourne. Raffinement possible en Phase 7 si on a besoin de distinguer "port ouvert mais serveur stuck".
+
+2. **Resource limits** : `mem_limit: 512m`, `cpus: "0.5"`. Le VPS héberge aussi Hermès et Traefik → on cap pour rester prédictible. Log rotation à 30 Mo max par container (`max-size: 10m × max-file: 3`).
+
+3. **Smoke test live embarqué dans l'image** (`scripts/mcp_live_smoke_test.py`) : 5 étapes en cascade via `fastmcp.Client` — `list_tools` → `search_products_raw` → `search_and_normalize` → `get_shipping_cost` sur le premier SKU → `get_product_detail` spot-check. Exit codes typés (0/1/2/3/4) pour que l'opérateur distingue immédiatement "pipeline bug" vs "inventaire AE sec" vs "filtres trop stricts". Surcharge via `MCP_URL`, `MCP_QUERY`, `MCP_MAX_RESULTS`, `MCP_COUNTRY`.
+
+4. **Le script live n'est PAS dupliqué dans l'image Hermès** : pour valider la connectivité inter-container, un `curl` simple suffit (pas besoin de Python). Évite une dette de synchronisation entre les 2 images.
+
+5. **Section critique dans `docs/deploy.md` — Vérification DNS inter-container** : en Phase 8 le scout agent appellera `http://aliexpress-mcp:8080/mcp` depuis Hermès. Si le DNS Docker ne résout pas, on découvre le problème bien plus tard dans la chaîne scout (très pénible à debugger). On valide maintenant avec 3 checks :
+   - `docker network inspect hermes-agent-hjft_default` → doit lister les 2 containers
+   - `getent hosts aliexpress-mcp` depuis Hermès → doit renvoyer une IP 172.x
+   - `curl -o /dev/null -w "%{http_code}" http://aliexpress-mcp:8080/mcp` depuis Hermès → code HTTP (pas "Connection refused")
+
+**Contenu `docs/deploy.md`** (8 sections + cheat-sheet) :
+- Prérequis (Docker, réseau, repo cloné, `.env` présent avec tokens valides)
+- Mise à jour code (`git fetch/status/pull`, noter SHA pour rollback)
+- Build + `up -d` + logs de démarrage (signes d'un démarrage propre vs crash loop)
+- Vérifier l'état (`docker compose ps`, healthcheck, `stats`, network inspect)
+- Smoke test live — Option A dans le container (recommandée)
+- Vérification DNS inter-container — 3 checks + troubleshooting par symptôme
+- Monitoring continu (logs live, historique, stats)
+- Rollback (`compose down` + `git reset --hard <SHA>`)
+- Troubleshooting (container crash, OAuth expiré, healthcheck KO, DNS muet, OOM — chaque cas avec sa commande de diag et son fix)
+- Cheat-sheet des 10 commandes de référence
+
+**Contraintes respectées** :
+- `src/` et `tests/` intouchés → les 200 tests unitaires restent verts
+- `.env` jamais bakée dans l'image, injectée via `env_file`
+- `tests/fixtures/` jamais copiées dans l'image (dev-only)
+- Un seul commit feat + un commit docs
+
+**Prochaine étape opérateur (Hakim, sur terminal Hostinger)** :
+1. `ssh` au VPS → `cd /opt/aliexpress-mcp-server` → `git pull`
+2. `docker compose build && docker compose up -d`
+3. Suivre `docs/deploy.md` étapes 3 à 4b
+4. Coller les sorties ici, on debug ensemble si besoin
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
