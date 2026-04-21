@@ -684,6 +684,47 @@ Utiliser `id` à la place de `sku_id` déclenche silencieusement `code: 501, msg
 3. Suivre `docs/deploy.md` étapes 3 à 4b
 4. Coller les sorties ici, on debug ensemble si besoin
 
+### 2026-04-21 — Phase 6 extended : tool `search_and_diagnose` pour calibration
+
+**Déclencheur** : premier smoke test live sur le VPS a renvoyé **0 produit PASS** pour `aspirateur robot` avec `max_results=20`. L'inspection des 20 items bruts (via `search_products_raw`) a montré 5 items au-dessus du seuil 25€ (28€ / 34€ / 77€ / ...), donc le filtre prix n'était pas le coupable — mais impossible de savoir lequel des 10 autres filtres coupait sans trawler les logs structlog du container.
+
+**Décision** : exposer un 5e tool MCP `search_and_diagnose` qui retourne **tous** les candidats (PASS et KILL) avec pour chacun la liste des filtres passés/échoués + les valeurs scannées. Le scout peut l'appeler manuellement quand `search_and_normalize` renvoie 0, et on peut l'utiliser depuis le VPS pour calibrer les seuils contre le vrai catalogue AE.
+
+**Refactor sous-jacent** : le normalizer utilisait `FilterRejection` + `_apply_*_filters` avec early-return pour short-circuiter les filtres coûteux. Pour collecter tous les échecs sans exceptions en control flow, j'ai remplacé par :
+- `_check(cond, name, passed, failed)` — helper qui range le filtre dans une liste ou l'autre
+- `_evaluate_item(..., early_exit: bool)` — une seule fonction, deux consommateurs :
+  - `normalize_search_results()` passe `early_exit=True` → comportement production inchangé, pas de régression coût API
+  - `diagnose_search_results()` passe `early_exit=False` → appelle freight.query sur chaque candidat pour évaluer tous les filtres → **plus cher mais complet**
+
+**Nouveau dataclass `ItemDiagnostic`** (frozen, dans `src/models.py`) : identité produit, verdict `PASS`/`KILL`, listes disjointes `passed_filters` / `failed_filters` (un filtre absent des deux = n'a pas pu être évalué, ex. filtre prix après KILL sur "no SKU in stock"), métadonnées scannées (rating, order_count, offer_sale_price_eur, store_ratings), et le `DropPilotProduct` complet embarqué uniquement si verdict PASS.
+
+**Sérialisation** (`serialize_diagnostic` dans `src/serializers.py`) : exclut volontairement le `product` embarqué — la sortie vise la calibration (quelques centaines de bytes par candidat), pas la donnée produit complète. Les callers qui ont besoin du full payload appellent `search_and_normalize`.
+
+**Tests (8 nouveaux, 208 total verts)** :
+- Test clé de régression : rating 4.3 → `failed_filters = ["rating_min"]` + `rating = 4.3` surfaced
+- Collection multi-échecs : rating 4.3 + store communication 4.3 + weight 5.0 kg → les 3 filtres dans `failed_filters`
+- Happy path : produit `_real_product_high_price()` → verdict PASS, `failed_filters=[]`, `product` non-None avec le bon SKU
+- Edge cases : `missing_itemId`, `product_get_failed`, `no SKU in stock` (vérifie aussi que les filtres base passent restent listés pour contraste), store ratings surface même en KILL
+- Tool-level : 2 items (haut prix + bas prix) → `pass_count=1, kill_count=1`, diagnostics corrects, `offer_sale_price_eur` du produit KILL surfacé
+
+**Commande de calibration sur VPS** (ajoutée dans `docs/deploy.md` section 4) :
+
+```bash
+docker exec aliexpress-mcp python -c "
+import asyncio, json
+from fastmcp import Client
+async def main():
+    async with Client('http://127.0.0.1:8080/mcp') as c:
+        r = await c.call_tool('search_and_diagnose', {
+            'query': 'aspirateur robot', 'max_results': 20, 'target_country': 'FR',
+        })
+        print(json.dumps(r.data, indent=2, ensure_ascii=False))
+asyncio.run(main())
+"
+```
+
+**Usage attendu** : exécuter cette commande sur le VPS avec différentes requêtes (`aspirateur robot`, `déshumidificateur`, `cave à vin`, etc.), analyser quels filtres dominent les KILL, ajuster les seuils `FILTERS_PASSE_1` si nécessaire (typiquement : les store ratings à 4.5 semblent trop stricts pour AE où beaucoup de stores tournent à 4.3-4.4). Redéployer et ré-exécuter jusqu'à obtenir un `pass_count` raisonnable.
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
