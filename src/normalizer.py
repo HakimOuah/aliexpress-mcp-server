@@ -577,6 +577,21 @@ async def _evaluate_item(
             )
 
     # ── 6. freight.query ───────────────────────────────────────────
+    # Diagnostic logging — track the exact params we send and the
+    # response we get back. Helps compare pipeline calls vs direct
+    # MCP calls when only the former fails (see 2026-04-21 debug
+    # session where direct calls returned success=true but the
+    # pipeline consistently saw success=false).
+    log.info(
+        "normalizer.freight_call",
+        product_id=product_id,
+        product_id_type=type(product_id).__name__,
+        sku_id=sku_ref.sku_id,
+        sku_id_type=type(sku_ref.sku_id).__name__,
+        country=target_country,
+        quantity=1,  # client defaults to quantity=1; logged explicitly
+    )
+    freight_result: dict[str, Any] | None = None
     try:
         freight_result = await client.get_shipping_cost(
             product_id=product_id,
@@ -585,13 +600,29 @@ async def _evaluate_item(
         )
         shipping = _build_shipping_info(freight_result, target_country)
     except IOPError as exc:
-        log.debug(
-            "normalizer.kill",
+        log.warning(
+            "normalizer.freight_raised",
             product_id=product_id,
-            stage="freight.query",
-            reason=str(exc),
+            sku_id=sku_ref.sku_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
         )
         shipping = None
+
+    # If the HTTP call returned but the AE business response was a
+    # failure (e.g. DELIVERY_INFO_EMPTY), surface the code and message
+    # so we can correlate with what get_shipping_cost alone returns.
+    if shipping is None and isinstance(freight_result, dict):
+        log.warning(
+            "normalizer.freight_failed",
+            product_id=product_id,
+            sku_id=sku_ref.sku_id,
+            country=target_country,
+            response_success=freight_result.get("success"),
+            response_code=freight_result.get("code"),
+            response_msg=freight_result.get("msg"),
+            response_keys=sorted(freight_result.keys()),
+        )
 
     if shipping is None:
         failed.append("shipping_fr_available")
