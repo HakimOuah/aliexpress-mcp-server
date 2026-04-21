@@ -725,6 +725,36 @@ asyncio.run(main())
 
 **Usage attendu** : exécuter cette commande sur le VPS avec différentes requêtes (`aspirateur robot`, `déshumidificateur`, `cave à vin`, etc.), analyser quels filtres dominent les KILL, ajuster les seuils `FILTERS_PASSE_1` si nécessaire (typiquement : les store ratings à 4.5 semblent trop stricts pour AE où beaucoup de stores tournent à 4.3-4.4). Redéployer et ré-exécuter jusqu'à obtenir un `pass_count` raisonnable.
 
+### 2026-04-21 — Phase 6 live validation : bug freight parsing résolu
+
+**Trouvé via `search_and_diagnose` sur le VPS** : tous les produits tombaient en KILL avec `shipping_fr_available: false`, alors que `get_shipping_cost` appelé directement avec les mêmes params renvoyait `success: true` et une option Cainiao à 1,99 €. Le pipeline pipeline avait donc un bug alors que le client client transportait la bonne réponse.
+
+**Méthode de diag** :
+1. Ajout temporaire de 3 logs diagnostiques dans `_evaluate_item` (`normalizer.freight_call` avant l'appel, `normalizer.freight_raised` sur IOPError, `normalizer.freight_failed` sur `success: false`).
+2. Relance live sur le VPS avec `docker logs aliexpress-mcp`.
+3. Les logs ont montré : HTTP OK, `response_code=200, response_success=True, response_keys=['code', 'delivery_options', 'msg', 'success']`.
+4. Inspection visuelle de `_build_shipping_info` a révélé que le parseur cherchait dans `aeop_freight_calculate_result_for_buyer_dtolist` (ou 2 autres noms legacy) — **aucun de ces 3 noms n'existe dans la réponse réelle**. Les options sont en fait sous `delivery_options.delivery_option_d_t_o`.
+
+**Origine du bug** : les 3 noms de clés testés venaient d'une inférence Phase 4 depuis le SDK legacy `moh3a/ae_sdk` qui ciblait `aliexpress.logistics.buyer.freight.calculate` (ancienne API). Le vrai endpoint `aliexpress.ds.freight.query` utilise une shape différente. Jamais confirmé en live à l'époque parce que le dump freight committé en Phase 3bis était un cas d'erreur (DELIVERY_INFO_EMPTY issu du bug `sku_attr` vs `sku_id`).
+
+**Fix appliqué** :
+- `_build_shipping_info` réécrit sur la vraie shape (keys `delivery_options.delivery_option_d_t_o`, champs `shipping_fee_cent` / `shipping_fee_format` / `shipping_fee_currency` / `min_delivery_days` / `max_delivery_days` / `company` / `code` / `ship_from_country` / `tracking` / `free_shipping`).
+- ⚠️ **Piège naming** : `shipping_fee_cent` malgré le suffixe `_cent` est déjà en EUR (pas en centimes). Confirmé par `shipping_fee_format: "1,99€"` qui match `shipping_fee_cent: "1.99"`. Commentaire embarqué dans le code pour le futur lecteur.
+- Nouvelle stratégie de sélection d'option shipping (extraite en `_pick_best_option` testable) :
+  1. EU warehouse (`ship_from_country` in `EU_COUNTRIES`) prioritaire
+  2. Moins cher (`shipping_fee_cent` parsé en float)
+  3. Plus rapide (`max_delivery_days`) comme tiebreaker
+- `_parse_delivery_range` supprimé (dead code — les jours sont désormais des int séparés, plus besoin de parser `"7-9"`).
+- Logs diagnostiques retirés (reverted au `log.debug "normalizer.kill"` standard).
+
+**Nouvelles fixtures committées** :
+- `tests/fixtures/real_freight_query_error_response.json` (renommé depuis `real_freight_query_response.json` pour clarté) — cas DELIVERY_INFO_EMPTY du premier smoke buggé.
+- `tests/fixtures/real_freight_query_success_response.json` — capture live 2026-04-21 (Cainiao Fulfillment, 1,99 €, 6-8 jours, CN, tracked). Devient la shape canonique de référence.
+
+**Tests** : 210/210 verts (208 → 210, net +2). Ajout de 11 tests sur la nouvelle logique (golden test sur fixture réelle + 3 tests stratégie sélection EU/cheapest/fastest + 3 tests `_pick_best_option` + tests edge cases manquants). Suppression de 8 tests obsolètes (`_parse_delivery_range` × 7, `tracked_over_untracked` qui reposait sur l'ancienne stratégie).
+
+**Leçon** : toute shape inférée sans capture live doit être marquée FIXME jusqu'à validation. L'ancienne shape était FIXMEé comme telle dans le code mais pas dans les tests — quand la fixture "success" manquait au repo, personne n'a pu cross-checker en réalité avant le run VPS. Règle pour les prochaines phases : **jamais merger un parseur sur shape inférée sans fixture live committée**.
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
