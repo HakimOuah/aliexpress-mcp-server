@@ -1,0 +1,18 @@
+services:
+  aliexpress-mcp:
+    build: .
+    container_name: aliexpress-mcp
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Localhost binding only — the scout agent and Hermes reach the
+      # server via the Docker network DNS name `aliexpress-mcp:8080`,
+      # never through the public interface.
+      - "127.0.0.1:8080:8080"
+    networks:
+      - hermes-network
+
+networks:
+  hermes-network:
+    external: true
+    name: hermes-agent-hjft_default

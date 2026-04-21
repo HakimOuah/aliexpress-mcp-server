@@ -1,5 +1,5 @@
 # MCP Server
-fastmcp>=0.1.0
+fastmcp>=3.0.0,<4.0.0
 
 # AliExpress IOP (direct HTTP calls, no SDK)
 httpx>=0.27.0

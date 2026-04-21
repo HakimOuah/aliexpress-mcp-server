@@ -96,13 +96,33 @@ Workflow attendu :
 
 ## 📦 Stack technique de ce projet
 
-- **Python 3.11**
-- **FastMCP** (SDK MCP officiel) — https://github.com/jlowin/fastmcp
-- **python-aliexpress-api** (wrapper AE) — https://github.com/sergioteula/python-aliexpress-api
+- **Python 3.11+ requis** (FastMCP v3 exige ≥ 3.10 ; le Dockerfile utilise `python:3.11-slim`). Créer le venv local avec `python3.11 -m venv .venv-311` (ou `uv venv --python 3.11 .venv-311`).
+- **FastMCP ≥ 3.0** (SDK MCP officiel) — https://github.com/jlowin/fastmcp
+- **httpx ≥ 0.27** — appels HTTP directs à la gateway IOP AE (le SDK `python-aliexpress-api` n'expose que l'API Affiliate, incompatible avec notre app Drop Shipping — cf. Phase 3bis)
 - **cachetools** — cache mémoire TTL (pas besoin de Redis pour ce scope)
 - **python-dotenv** — env management
 - **Flask** — uniquement pour le script OAuth one-shot
 - **pytest + pytest-asyncio** — tests avec mocks
+
+## 🔌 Serveur MCP — endpoints
+
+**URL interne Docker (réseau `hermes-network`)** : `http://aliexpress-mcp:8080/mcp`
+
+**URL locale (dev sur Mac)** : `http://127.0.0.1:8080/mcp`
+
+⚠️ **Important pour la Phase 8 (scout agent)** : le path MCP est `/mcp`, **pas `/`**. FastMCP v3 sert le Streamable HTTP sur ce chemin par défaut. Taper `http://aliexpress-mcp:8080/` renvoie 404.
+
+**Tools exposés** (fichier `src/server.py`) :
+
+| Tool | Signature courte | Usage |
+|---|---|---|
+| `search_and_normalize` | `(query, max_results=20, target_country="FR") -> list[dict]` | **Tool principal.** Pipeline complet : text.search → product.get → freight.query → filtres passe-1 (high-ticket). Renvoie des `DropPilotProduct` sérialisés. |
+| `search_products_raw` | `(query, max_results=20, target_country="FR", sort_by="orders") -> list[dict]` | Passthrough brut `aliexpress.ds.text.search`. Debug / investigation. |
+| `get_product_detail` | `(product_id) -> dict` | Passthrough brut `aliexpress.ds.product.get`. Deep-dive produit unique. |
+| `get_shipping_cost` | `(product_id, sku_id, country_code="FR", quantity=1) -> dict` | Passthrough brut `aliexpress.ds.freight.query`. **`sku_id` doit être le champ numérique** (pas `id` ni `sku_attr`). |
+
+**Lancement local (dev)** : `.venv-311/bin/python -m src.server`  
+**Lancement prod (VPS)** : `docker compose up -d` (cf. `docker-compose.yml`, port 8080 bindé sur `127.0.0.1` uniquement, réseau `hermes-network` externe partagé avec `hermes-agent-hjft`).
 
 ## 🚀 Déploiement cible
 
@@ -162,8 +182,10 @@ aliexpress-mcp-server/
 ├── docker-compose.yml
 ├── src/
 │   ├── __init__.py
-│   ├── server.py                   # serveur MCP FastMCP
-│   ├── aliexpress_client.py        # wrapper python-aliexpress-api
+│   ├── server.py                   # serveur MCP FastMCP (4 tools, cf. section "Serveur MCP — endpoints")
+│   ├── aliexpress_client.py        # client httpx async sur la gateway IOP (Drop Shipping)
+│   ├── iop_signature.py            # signature HMAC-SHA256 partagée (business + system endpoints)
+│   ├── serializers.py              # dataclass → dict JSON-ready pour MCP transport
 │   ├── normalizer.py               # AE raw → Product + scoring
 │   ├── cache.py                    # TTLCache avec décorateur
 │   ├── models.py                   # dataclasses Product, Verdict, ShippingInfo
@@ -228,6 +250,6 @@ Hakim va lancer Claude Code session par session, pas en one-shot :
 
 - Console AliExpress : https://openservice.aliexpress.com
 - Doc AE Dropshipping : accessible depuis la console AE, onglet Documentation
-- FastMCP docs : https://github.com/jlowin/fastmcp
-- python-aliexpress-api : https://github.com/sergioteula/python-aliexpress-api
+- FastMCP docs : https://gofastmcp.com (v3)
+- Ref shape IOP : `tests/fixtures/real_*.json` (captures live commitées)
 - API Anthropic (Managed Agents) : https://docs.claude.com
