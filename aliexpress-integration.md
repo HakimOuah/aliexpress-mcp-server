@@ -547,6 +547,52 @@ Utiliser `id` à la place de `sku_id` déclenche silencieusement `code: 501, msg
 - Mapping `sort_by` : `"orders,desc"` validé en live, alternatives `"orders_desc"` / `"LAST_VOLUME,desc"` documentées comme fallback manuel si AE change
 - Normalizer : conversion `dict[str, Any]` brut → `Product` dataclass avec scoring DropPilot (PASS / WATCH / KILL)
 
+### 2026-04-21 — Phase 4 : Normalizer DropPilot + filtres high-ticket
+
+**Objectif** : transformer les payloads bruts IOP (3 endpoints) en objets `DropPilotProduct` standardisés, immuables, qualitativement filtrés. Le scout agent (Phase 8) récupère ensuite les produits "passe 1" et applique le scoring marge + concurrence.
+
+**Décisions structurantes** :
+
+1. **Client "dumb transport" / normalizer "smart"** : la Phase 3bis reste un wrapper HTTP pur (pas de sémantique métier). La Phase 4 fait TOUT le travail : extraction, enrichissement, filtrage. Ce découpage permet de faire évoluer les règles DropPilot sans toucher au client.
+
+2. **Filtres "passe 1" éliminatoires** : si un filtre échoue → KILL silencieux (log DEBUG + product non retourné). Pas de verdict `WATCH` ni de score à ce niveau — c'est binaire, pour garder le signal clean vers le scout. 11 filtres :
+
+| Filtre | Seuil | Motivation |
+|---|---|---|
+| `rating_min` | ≥ 4.5 | Qualité produit perçue |
+| `orders_min` | ≥ 300 | Validation marché |
+| `store_shipping_rating_min` | ≥ 4.5 | Store OK pour livraison |
+| `store_communication_rating_min` | ≥ 4.5 | Store OK pour SAV éventuel |
+| `store_as_described_rating_min` | ≥ 4.5 | Store fiable sur les fiches |
+| `min_stock_ref_sku` | ≥ 1 | SKU de réf doit exister |
+| **`offer_sale_price_min_eur`** | **≥ 25.0 €** | **High-ticket : coût dropshipper < 25 € ne peut pas multiplier crédiblement vers 200-300 €** |
+| `max_weight_kg` | ≤ 3.0 | Shipping abordable |
+| `max_length_cm` | ≤ 60 | Plus grande dim raisonnable |
+| `shipping_fr_available` | True | AE peut livrer en France |
+| `max_delivery_days` | ≤ 15 | Délai acceptable pour conversion |
+
+3. **Sélection SKU de référence** : le moins cher avec `sku_available_stock ≥ 1`. Flag `sku_ref_is_cheapest_absolute` ajouté pour signaler quand on a fallback sur un SKU plus cher parce que le moins cher absolu est OOS — signal utile au scout : le "prix d'appel" affiché par text.search est alors trompeur.
+
+4. **Concurrency** : `asyncio.Semaphore(5)` autour du pipeline per-item. `product.get` et `freight.query` restent séquentiels par produit (le second a besoin du `sku_id` du premier), mais 5 produits en parallèle. Prudent pour éviter rate limit AE, tuning à revoir en charge réelle.
+
+5. **Fixture freight success** : la capture live `real_freight_query_response.json` est un cas d'**erreur** (`DELIVERY_INFO_EMPTY` issue du premier smoke test buggé). Le chain corrigé a bien renvoyé un Cainiao 1.99€ en live, mais ce dump n'est pas committé. Les tests happy path utilisent des fixtures synthétiques (`FREIGHT_SUCCESS_CN`, `FREIGHT_SUCCESS_ES`, `FREIGHT_SUCCESS_SLOW`) avec shape inférée — à remplacer par une vraie capture si smoke test ultérieur.
+
+**Travail réalisé** :
+- `src/models.py` : 6 dataclasses `frozen=True` (`SkuRef`, `StoreInfo`, `ShippingInfo`, `PackageInfo`, `DropPilotProduct`, + `Verdict` conservé pour future use). Remplace l'ancien `Product` minimaliste de Phase 1.
+- `src/normalizer.py` (420 lignes, nouveau) : pipeline async complet, 3 nouveaux parsers (`_parse_weight_kg`, `_parse_int_safe`, `_normalize_url`, `_split_images`, `_parse_delivery_range`), sélection SKU, parser freight défensif avec fallbacks de noms de champs (FIXME pinner post-live-capture), builders par sous-section, filtres groupés en helpers `_apply_*_filters` qui raise `FilterRejection`.
+- `tests/test_normalizer.py` (17 tests async) : happy path sur fixture réelle bumpée high-price + 10 tests KILL (1 par filtre) + flag cheapest absolute + concurrency sanity.
+- `tests/test_normalizer_helpers.py` (45 tests sync) : 6 parsers paramétrés × edge cases, sélection SKU edge cases, freight parser fallbacks, `_is_cheapest_absolute` logique (min, ties, zero-priced, OOS fallback).
+
+**Validation fonctionnelle** :
+- **Scenario A** — tapis de sol absorbant (`product_id=1005008177221739`, SKU le moins cher 5.09 €) → **KILL** sur `offer_sale_price 5.09€ < 25.0€ (high-ticket floor)`. Conforme à la stratégie.
+- **Scenario B** — cave à vin thermoélectrique 12 bouteilles synthétique (SKU le moins cher 38.50 €, 2.8 kg, 45×35×55 cm, Choice yes, rating 4.7, store 4.8/4.7/4.6, shipping Cainiao 12.50 € 8-12j) → **PASS** sur les 11 filtres. Coût total 51 € → vente cible 255 €, marge brute ~80%.
+
+**Tests** : **191/191 verts** en 0.19 s (119 précédents + 10 nouveaux tests price filter/flag + 45 helpers + 17 async).
+
+**Différé (non Phase 4)** :
+- Cache TTL `cachetools` : retiré du scope (YAGNI — on ajoutera si le smoke test révèle un besoin de cache en amont).
+- Tuning `CONCURRENCY_LIMIT` : à ajuster quand on verra le comportement sous charge réelle.
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
