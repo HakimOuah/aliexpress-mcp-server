@@ -1,0 +1,32 @@
+{
+  "aliexpress_ds_freight_query_response": {
+    "result": {
+      "msg": "Call succeeds",
+      "code": 200,
+      "success": true,
+      "delivery_options": {
+        "delivery_option_d_t_o": [
+          {
+            "code": "CAINIAO_FULFILLMENT_STD",
+            "shipping_fee_currency": "EUR",
+            "shipping_fee_cent": "1.99",
+            "shipping_fee_format": "1,99€",
+            "free_shipping": false,
+            "free_shipping_threshold": "0,00€",
+            "min_delivery_days": 6,
+            "max_delivery_days": 8,
+            "guaranteed_delivery_days": "60",
+            "delivery_date_desc": "avr. 27 - 29",
+            "company": "AliExpress Selection Standard",
+            "ship_from_country": "CN",
+            "tracking": true,
+            "available_stock": "76",
+            "mayHavePFS": true
+          }
+        ]
+      }
+    },
+    "request_id": "2101546d17767599119526327",
+    "_trace_id_": "2140d36217767599119516488e0fcf"
+  }
+}

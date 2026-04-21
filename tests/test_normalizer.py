@@ -66,70 +66,74 @@ def _real_product_high_price() -> dict[str, Any]:
 
 
 def _real_freight_error_result() -> dict[str, Any]:
-    """The committed real_freight_query_response.json is the FIRST live
-    capture — an error case (code 501, DELIVERY_INFO_EMPTY) from the
-    buggy chain that passed sku_attr as selectedSkuId. A subsequent
-    live chain (after the sku_id fix) returned a Cainiao success but
-    wasn't dumped to the repo, so success paths rely on the synthetic
-    `FREIGHT_SUCCESS_*` dicts below."""
-    data = _load("real_freight_query_response.json")
+    """Live capture of an error case (code 501, DELIVERY_INFO_EMPTY)
+    from the buggy chain that passed sku_attr as selectedSkuId."""
+    data = _load("real_freight_query_error_response.json")
     return data["aliexpress_ds_freight_query_response"]["result"]
 
 
-# Synthetic freight success, shape inferred from 2026-04-21 live chain
-# ("Cainiao Fulfillment, 1.99€, 7-9 jours, tracké, CN warehouse").
-FREIGHT_SUCCESS_CN: dict[str, Any] = {
-    "success": True,
-    "aeop_freight_calculate_result_for_buyer_dtolist": [
-        {
-            "service_name": "Cainiao Fulfillment",
-            "service_code": "CAINIAO_FULFILLMENT_STD",
-            "estimated_delivery_time": "7-9",
-            "tracking_available": "true",
-            "freight": {
-                "amount": "1.99",
-                "formatted_amount": "1,99€",
-                "currency_code": "EUR",
-            },
-            "send_goods_country_code": "CN",
-            "delivery_date_desc": "avr. 28 - 30",
-        }
-    ],
-}
+def _real_freight_success_result() -> dict[str, Any]:
+    """Live capture of a freight success (2026-04-21): 1 Cainiao
+    Fulfillment option, 1.99€, 6-8 days, CN warehouse, tracked."""
+    data = _load("real_freight_query_success_response.json")
+    return data["aliexpress_ds_freight_query_response"]["result"]
 
 
+# Default success payload used by happy-path tests — the real live
+# capture (CN warehouse, 1.99€, 6-8 days).
+FREIGHT_SUCCESS_CN: dict[str, Any] = _real_freight_success_result()
+
+
+# Synthetic EU-warehouse variant — no real EU capture yet, so shape
+# mirrors the live success dump with `ship_from_country: "ES"` and a
+# cheaper, faster option.
 FREIGHT_SUCCESS_ES: dict[str, Any] = {
+    "msg": "Call succeeds",
+    "code": 200,
     "success": True,
-    "aeop_freight_calculate_result_for_buyer_dtolist": [
-        {
-            "service_name": "AliExpress Selection Standard",
-            "service_code": "AE_STANDARD",
-            "estimated_delivery_time": "3-5",
-            "tracking_available": "true",
-            "freight": {
-                "amount": "0.99",
-                "formatted_amount": "0,99€",
-                "currency_code": "EUR",
-            },
-            "send_goods_country_code": "ES",
-            "delivery_date_desc": "avr. 24 - 26",
-        }
-    ],
+    "delivery_options": {
+        "delivery_option_d_t_o": [
+            {
+                "code": "AE_STANDARD_ES",
+                "shipping_fee_currency": "EUR",
+                "shipping_fee_cent": "0.99",
+                "shipping_fee_format": "0,99€",
+                "free_shipping": False,
+                "min_delivery_days": 3,
+                "max_delivery_days": 5,
+                "delivery_date_desc": "avr. 24 - 26",
+                "company": "AliExpress Selection Standard",
+                "ship_from_country": "ES",
+                "tracking": True,
+            }
+        ]
+    },
 }
 
 
+# Synthetic "too slow" variant — 20-25 days trips the max_delivery_days
+# filter (threshold 15).
 FREIGHT_SUCCESS_SLOW: dict[str, Any] = {
+    "msg": "Call succeeds",
+    "code": 200,
     "success": True,
-    "aeop_freight_calculate_result_for_buyer_dtolist": [
-        {
-            "service_name": "AliExpress Saver",
-            "service_code": "AE_SAVER",
-            "estimated_delivery_time": "20-25",
-            "tracking_available": "true",
-            "freight": {"amount": "0.50", "currency_code": "EUR"},
-            "send_goods_country_code": "CN",
-        }
-    ],
+    "delivery_options": {
+        "delivery_option_d_t_o": [
+            {
+                "code": "AE_SAVER",
+                "shipping_fee_currency": "EUR",
+                "shipping_fee_cent": "0.50",
+                "shipping_fee_format": "0,50€",
+                "free_shipping": False,
+                "min_delivery_days": 20,
+                "max_delivery_days": 25,
+                "delivery_date_desc": "mai 10 - 15",
+                "company": "AliExpress Saver",
+                "ship_from_country": "CN",
+                "tracking": True,
+            }
+        ]
+    },
 }
 
 
@@ -212,7 +216,7 @@ async def test_pipeline_returns_product_when_all_filters_pass() -> None:
     # Shipping (from FREIGHT_SUCCESS_CN)
     assert product.shipping_fr is not None
     assert product.shipping_fr.cost_eur == pytest.approx(1.99)
-    assert product.shipping_fr.max_delivery_days == 9
+    assert product.shipping_fr.max_delivery_days == 8
     assert product.shipping_fr.ship_from_country == "CN"
     assert product.shipping_fr.is_eu_warehouse is False
     assert product.shipping_fr.tracking is True

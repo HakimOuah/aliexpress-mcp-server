@@ -38,7 +38,8 @@ tests/fixtures/real_*.json
 # business-error payload).
 !tests/fixtures/real_text_search_response.json
 !tests/fixtures/real_product_get_response.json
-!tests/fixtures/real_freight_query_response.json
+!tests/fixtures/real_freight_query_error_response.json
+!tests/fixtures/real_freight_query_success_response.json
 
 # OS
 .DS_Store

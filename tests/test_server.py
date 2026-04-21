@@ -56,24 +56,14 @@ def _real_product_high_price() -> dict[str, Any]:
     return p
 
 
-FREIGHT_SUCCESS_CN: dict[str, Any] = {
-    "success": True,
-    "aeop_freight_calculate_result_for_buyer_dtolist": [
-        {
-            "service_name": "Cainiao Fulfillment",
-            "service_code": "CAINIAO_FULFILLMENT_STD",
-            "estimated_delivery_time": "7-9",
-            "tracking_available": "true",
-            "freight": {
-                "amount": "1.99",
-                "formatted_amount": "1,99€",
-                "currency_code": "EUR",
-            },
-            "send_goods_country_code": "CN",
-            "delivery_date_desc": "avr. 28 - 30",
-        }
-    ],
-}
+def _real_freight_success_result() -> dict[str, Any]:
+    data = _load("real_freight_query_success_response.json")
+    return data["aliexpress_ds_freight_query_response"]["result"]
+
+
+# Use the live-captured success response so server tests exercise the
+# same shape the real FastMCP tools will see in production.
+FREIGHT_SUCCESS_CN: dict[str, Any] = _real_freight_success_result()
 
 
 def _make_mock_client(
@@ -269,7 +259,8 @@ async def test_get_shipping_cost_returns_result_dict() -> None:
             },
         )
     assert result.data["success"] is True
-    assert "aeop_freight_calculate_result_for_buyer_dtolist" in result.data
+    assert "delivery_options" in result.data
+    assert "delivery_option_d_t_o" in result.data["delivery_options"]
 
 
 # ── search_and_diagnose ────────────────────────────────────────────────────
@@ -324,7 +315,7 @@ async def test_search_and_diagnose_reports_pass_and_kill_for_same_query() -> Non
 
 
 async def test_get_shipping_cost_passes_delivery_info_empty_through() -> None:
-    error_result = _load("real_freight_query_response.json")[
+    error_result = _load("real_freight_query_error_response.json")[
         "aliexpress_ds_freight_query_response"
     ]["result"]
     set_client_for_testing(_make_mock_client(freight_result=error_result))

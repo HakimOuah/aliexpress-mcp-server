@@ -111,24 +111,6 @@ def _split_images(raw: object) -> list[str]:
     return [u.strip() for u in text.split(";") if u.strip()]
 
 
-def _parse_delivery_range(raw: object) -> tuple[int, int]:
-    """'7-9' → (7, 9); '10' → (10, 10); '' → (0, 0)."""
-    if raw is None:
-        return 0, 0
-    text = str(raw).strip()
-    if not text:
-        return 0, 0
-    parts = [p.strip() for p in text.split("-") if p.strip()]
-    try:
-        if len(parts) >= 2:
-            return int(parts[0]), int(parts[1])
-        if len(parts) == 1:
-            return int(parts[0]), int(parts[0])
-    except ValueError:
-        pass
-    return 0, 0
-
-
 # ── Sub-dataclass builders ──────────────────────────────────────────────────
 
 
@@ -253,94 +235,90 @@ def _is_aliexpress_choice(properties: Any) -> bool:
 def _build_shipping_info(
     freight_result: dict[str, Any] | None, target_country: str
 ) -> ShippingInfo | None:
-    """Parse a freight.query `result` dict. Returns None when:
-    - the result is absent / malformed
-    - `success` is false (business-error case, e.g. DELIVERY_INFO_EMPTY)
-    - no shipping methods are listed
+    """Parse a freight.query `result` dict into a `ShippingInfo`.
 
-    Picks the cheapest tracked method if available, otherwise the
-    cheapest untracked. FIXME: pin field names on first live success
-    capture; fallbacks below are best-effort.
+    Shape pinned from a live capture 2026-04-21 (`result`)::
+
+        {
+          "success": true,
+          "code": 200,
+          "msg": "Call succeeds",
+          "delivery_options": {
+            "delivery_option_d_t_o": [
+              {"code", "shipping_fee_cent", "shipping_fee_format",
+               "shipping_fee_currency", "min_delivery_days",
+               "max_delivery_days", "delivery_date_desc", "company",
+               "ship_from_country", "tracking", "free_shipping", ...},
+              ...
+            ]
+          }
+        }
+
+    Returns None when:
+      * the input isn't a dict, `success` is falsy
+      * `delivery_options.delivery_option_d_t_o` is missing or empty
+
+    Selection policy (priority ordered):
+      1. EU warehouse (`ship_from_country` in `EU_COUNTRIES`)
+      2. Cheapest `shipping_fee_cent` (NB — despite the name this
+         field is already in the target currency unit, not cents;
+         `shipping_fee_format` "1,99€" confirms).
+      3. Fastest (lowest `max_delivery_days`) as tiebreaker.
     """
     if not isinstance(freight_result, dict):
         return None
     if not freight_result.get("success"):
         return None
 
-    methods = (
-        freight_result.get("aeop_freight_calculate_result_for_buyer_dtolist")
-        or freight_result.get("aeop_freight_calculate_result_for_buyer_d_t_o_list")
-        or freight_result.get("shipping_methods")
-        or []
-    )
-    candidates = [m for m in methods if isinstance(m, dict)]
-    if not candidates:
+    container = freight_result.get("delivery_options")
+    if not isinstance(container, dict):
         return None
 
-    def _amount(m: dict[str, Any]) -> float:
-        freight = m.get("freight")
-        if isinstance(freight, dict):
-            return _parse_eur(freight.get("amount"))
-        return 0.0
+    raw_options = container.get("delivery_option_d_t_o") or []
+    options = [o for o in raw_options if isinstance(o, dict)]
+    if not options:
+        return None
 
-    def _is_tracked(m: dict[str, Any]) -> bool:
-        return str(m.get("tracking_available") or m.get("trackingAvailable", "")).strip().lower() in (
-            "true", "1", "yes",
-        )
+    picked = _pick_best_option(options)
+    if picked is None:
+        return None
 
-    tracked = [m for m in candidates if _is_tracked(m)]
-    picked = min(tracked or candidates, key=_amount)
-
-    freight = picked.get("freight") or {}
-    amount = _amount(picked)
-    cost_format = (
-        str(freight.get("formatted_amount"))
-        if isinstance(freight, dict) and freight.get("formatted_amount")
-        else str(picked.get("formatted_amount") or picked.get("displayAmount") or "")
-    )
-    currency = str(freight.get("currency_code") or "EUR") if isinstance(freight, dict) else "EUR"
-
-    min_days, max_days = _parse_delivery_range(
-        picked.get("estimated_delivery_time") or picked.get("estimatedDeliveryTime")
-    )
-
-    ship_from = str(
-        picked.get("send_goods_country_code")
-        or picked.get("ship_from_country_code")
-        or picked.get("ship_from_country")
-        or picked.get("shipFromCountry")
-        or ""
-    ).upper()
-
+    ship_from = str(picked.get("ship_from_country") or "").upper()
     return ShippingInfo(
         country_code=target_country,
-        cost_eur=amount,
-        cost_format=cost_format,
-        currency=currency,
-        min_delivery_days=min_days,
-        max_delivery_days=max_days,
-        delivery_date_desc=str(
-            picked.get("delivery_date_desc")
-            or picked.get("deliveryDateDesc")
-            or ""
-        ),
+        cost_eur=_parse_eur(picked.get("shipping_fee_cent")),
+        cost_format=str(picked.get("shipping_fee_format") or ""),
+        currency=str(picked.get("shipping_fee_currency") or "EUR"),
+        min_delivery_days=_parse_int_safe(picked.get("min_delivery_days")),
+        max_delivery_days=_parse_int_safe(picked.get("max_delivery_days")),
+        delivery_date_desc=str(picked.get("delivery_date_desc") or ""),
         ship_from_country=ship_from,
         is_eu_warehouse=ship_from in EU_COUNTRIES,
-        tracking=_is_tracked(picked),
-        company=str(
-            picked.get("service_name")
-            or picked.get("company")
-            or picked.get("shipping_method")
-            or ""
-        ),
-        shipping_code=str(
-            picked.get("service_code")
-            or picked.get("shipping_code")
-            or picked.get("code")
-            or ""
-        ),
-        free_shipping=amount == 0.0,
+        tracking=bool(picked.get("tracking", False)),
+        company=str(picked.get("company") or ""),
+        shipping_code=str(picked.get("code") or ""),
+        free_shipping=bool(picked.get("free_shipping", False)),
     )
+
+
+def _pick_best_option(options: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """EU warehouse > cheapest > fastest. See `_build_shipping_info`."""
+    if not options:
+        return None
+
+    def sort_key(opt: dict[str, Any]) -> tuple[int, float, int]:
+        is_eu = str(opt.get("ship_from_country") or "").upper() in EU_COUNTRIES
+        price = _parse_eur(opt.get("shipping_fee_cent"))
+        if price <= 0.0:
+            # AE sometimes reports 0 for free shipping but also for bad data.
+            # Trust the `free_shipping` boolean: real 0 stays 0 (best), bad
+            # data becomes +inf so it loses the race.
+            price = 0.0 if opt.get("free_shipping") else float("inf")
+        delay = _parse_int_safe(opt.get("max_delivery_days"), default=999)
+        # Lower is better; `not is_eu` makes EU (False=0) beat non-EU.
+        return (0 if is_eu else 1, price, delay)
+
+    return min(options, key=sort_key)
 
 
 # ── Main pipeline ───────────────────────────────────────────────────────────
@@ -577,21 +555,6 @@ async def _evaluate_item(
             )
 
     # ── 6. freight.query ───────────────────────────────────────────
-    # Diagnostic logging — track the exact params we send and the
-    # response we get back. Helps compare pipeline calls vs direct
-    # MCP calls when only the former fails (see 2026-04-21 debug
-    # session where direct calls returned success=true but the
-    # pipeline consistently saw success=false).
-    log.info(
-        "normalizer.freight_call",
-        product_id=product_id,
-        product_id_type=type(product_id).__name__,
-        sku_id=sku_ref.sku_id,
-        sku_id_type=type(sku_ref.sku_id).__name__,
-        country=target_country,
-        quantity=1,  # client defaults to quantity=1; logged explicitly
-    )
-    freight_result: dict[str, Any] | None = None
     try:
         freight_result = await client.get_shipping_cost(
             product_id=product_id,
@@ -600,29 +563,13 @@ async def _evaluate_item(
         )
         shipping = _build_shipping_info(freight_result, target_country)
     except IOPError as exc:
-        log.warning(
-            "normalizer.freight_raised",
+        log.debug(
+            "normalizer.kill",
             product_id=product_id,
-            sku_id=sku_ref.sku_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
+            stage="freight.query",
+            reason=str(exc),
         )
         shipping = None
-
-    # If the HTTP call returned but the AE business response was a
-    # failure (e.g. DELIVERY_INFO_EMPTY), surface the code and message
-    # so we can correlate with what get_shipping_cost alone returns.
-    if shipping is None and isinstance(freight_result, dict):
-        log.warning(
-            "normalizer.freight_failed",
-            product_id=product_id,
-            sku_id=sku_ref.sku_id,
-            country=target_country,
-            response_success=freight_result.get("success"),
-            response_code=freight_result.get("code"),
-            response_msg=freight_result.get("msg"),
-            response_keys=sorted(freight_result.keys()),
-        )
 
     if shipping is None:
         failed.append("shipping_fr_available")

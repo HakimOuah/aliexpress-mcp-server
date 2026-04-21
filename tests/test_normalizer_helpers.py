@@ -21,9 +21,9 @@ from src.normalizer import (
     _is_aliexpress_choice,
     _is_cheapest_absolute,
     _normalize_url,
-    _parse_delivery_range,
     _parse_int_safe,
     _parse_weight_kg,
+    _pick_best_option,
     _select_cheapest_in_stock,
     _split_images,
 )
@@ -37,7 +37,12 @@ def _load(name: str) -> dict[str, Any]:
 
 
 def _real_freight_error_result() -> dict[str, Any]:
-    data = _load("real_freight_query_response.json")
+    data = _load("real_freight_query_error_response.json")
+    return data["aliexpress_ds_freight_query_response"]["result"]
+
+
+def _real_freight_success_result() -> dict[str, Any]:
+    data = _load("real_freight_query_success_response.json")
     return data["aliexpress_ds_freight_query_response"]["result"]
 
 
@@ -117,25 +122,6 @@ def test_split_images(raw: object, expected: list[str]) -> None:
     assert _split_images(raw) == expected
 
 
-# ── _parse_delivery_range ──────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("7-9", (7, 9)),
-        ("10", (10, 10)),
-        ("", (0, 0)),
-        (None, (0, 0)),
-        ("abc", (0, 0)),
-        ("3-5-7", (3, 5)),
-        ("  7 - 9  ", (7, 9)),
-    ],
-)
-def test_parse_delivery_range(raw: object, expected: tuple[int, int]) -> None:
-    assert _parse_delivery_range(raw) == expected
-
-
 # ── _is_aliexpress_choice ──────────────────────────────────────────────────
 
 
@@ -213,42 +199,157 @@ def test_select_cheapest_ignores_zero_priced() -> None:
 # ── _build_shipping_info ──────────────────────────────────────────────────
 
 
+def _shape(options: list[dict[str, Any]]) -> dict[str, Any]:
+    """Wrap a list of option dicts in the canonical live shape."""
+    return {
+        "msg": "Call succeeds",
+        "code": 200,
+        "success": True,
+        "delivery_options": {"delivery_option_d_t_o": options},
+    }
+
+
+def test_build_shipping_info_parses_real_freight_response() -> None:
+    """Golden test against the committed live success capture."""
+    info = _build_shipping_info(_real_freight_success_result(), "FR")
+    assert info is not None
+    assert info.cost_eur == pytest.approx(1.99)
+    assert info.cost_format == "1,99€"
+    assert info.currency == "EUR"
+    assert info.min_delivery_days == 6
+    assert info.max_delivery_days == 8
+    assert info.delivery_date_desc == "avr. 27 - 29"
+    assert info.ship_from_country == "CN"
+    assert info.is_eu_warehouse is False
+    assert info.tracking is True
+    assert info.company == "AliExpress Selection Standard"
+    assert info.shipping_code == "CAINIAO_FULFILLMENT_STD"
+    assert info.free_shipping is False
+
+
 def test_build_shipping_info_returns_none_on_error_result() -> None:
     assert _build_shipping_info(_real_freight_error_result(), "FR") is None
 
 
-def test_build_shipping_info_returns_none_on_empty_methods() -> None:
-    result = {
-        "success": True,
-        "aeop_freight_calculate_result_for_buyer_dtolist": [],
-    }
-    assert _build_shipping_info(result, "FR") is None
+def test_build_shipping_info_returns_none_on_empty_options() -> None:
+    assert _build_shipping_info(_shape([]), "FR") is None
 
 
-def test_build_shipping_info_picks_tracked_over_untracked() -> None:
-    result = {
-        "success": True,
-        "aeop_freight_calculate_result_for_buyer_dtolist": [
-            {
-                "service_name": "Cheap but untracked",
-                "tracking_available": "false",
-                "estimated_delivery_time": "10-14",
-                "freight": {"amount": "0.50", "currency_code": "EUR"},
-                "send_goods_country_code": "CN",
-            },
-            {
-                "service_name": "Tracked slightly pricier",
-                "tracking_available": "true",
-                "estimated_delivery_time": "7-9",
-                "freight": {"amount": "1.99", "currency_code": "EUR"},
-                "send_goods_country_code": "CN",
-            },
-        ],
+def test_build_shipping_info_returns_none_on_missing_delivery_options() -> None:
+    # `success: true` but no delivery_options wrapper — can't build anything.
+    assert _build_shipping_info(
+        {"msg": "Call succeeds", "code": 200, "success": True}, "FR"
+    ) is None
+
+
+def test_build_shipping_info_returns_none_on_wrong_success_flag() -> None:
+    assert _build_shipping_info(_shape([{"code": "X"}]) | {"success": False}, "FR") is None
+
+
+def _option(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "code": "TEST",
+        "shipping_fee_currency": "EUR",
+        "shipping_fee_cent": "1.99",
+        "shipping_fee_format": "1,99€",
+        "free_shipping": False,
+        "min_delivery_days": 6,
+        "max_delivery_days": 8,
+        "delivery_date_desc": "avr. 27 - 29",
+        "company": "Cainiao Fulfillment",
+        "ship_from_country": "CN",
+        "tracking": True,
     }
-    info = _build_shipping_info(result, "FR")
+    base.update(overrides)
+    return base
+
+
+def test_build_shipping_info_prefers_eu_warehouse_over_cn() -> None:
+    """Priority 1: EU wins even when CN is cheaper/faster."""
+    info = _build_shipping_info(
+        _shape([
+            _option(code="CN_CHEAP", ship_from_country="CN",
+                    shipping_fee_cent="0.50", max_delivery_days=6),
+            _option(code="ES_PRICIER", ship_from_country="ES",
+                    shipping_fee_cent="3.99", max_delivery_days=10),
+        ]),
+        "FR",
+    )
     assert info is not None
-    assert info.tracking is True
-    assert info.company == "Tracked slightly pricier"
+    assert info.shipping_code == "ES_PRICIER"
+    assert info.is_eu_warehouse is True
+    assert info.ship_from_country == "ES"
+
+
+def test_build_shipping_info_picks_cheapest_within_same_region() -> None:
+    """Priority 2: within a tier, the cheapest wins."""
+    info = _build_shipping_info(
+        _shape([
+            _option(code="EXPENSIVE_CN", ship_from_country="CN",
+                    shipping_fee_cent="4.99", max_delivery_days=6),
+            _option(code="CHEAP_CN", ship_from_country="CN",
+                    shipping_fee_cent="1.99", max_delivery_days=8),
+        ]),
+        "FR",
+    )
+    assert info is not None
+    assert info.shipping_code == "CHEAP_CN"
+    assert info.cost_eur == pytest.approx(1.99)
+
+
+def test_build_shipping_info_picks_fastest_on_price_tie() -> None:
+    """Priority 3: same tier + same price → fastest wins."""
+    info = _build_shipping_info(
+        _shape([
+            _option(code="SLOW", ship_from_country="CN",
+                    shipping_fee_cent="1.99", max_delivery_days=15),
+            _option(code="FAST", ship_from_country="CN",
+                    shipping_fee_cent="1.99", max_delivery_days=8),
+        ]),
+        "FR",
+    )
+    assert info is not None
+    assert info.shipping_code == "FAST"
+    assert info.max_delivery_days == 8
+
+
+def test_build_shipping_info_free_shipping_flag_trusted() -> None:
+    info = _build_shipping_info(
+        _shape([_option(shipping_fee_cent="0.00", free_shipping=True)]),
+        "FR",
+    )
+    assert info is not None
+    assert info.cost_eur == 0.0
+    assert info.free_shipping is True
+
+
+# ── _pick_best_option (sort key coverage) ───────────────────────────────────
+
+
+def test_pick_best_option_returns_none_on_empty() -> None:
+    assert _pick_best_option([]) is None
+
+
+def test_pick_best_option_eu_beats_non_eu_regardless_of_price() -> None:
+    picked = _pick_best_option([
+        _option(code="CN", ship_from_country="CN", shipping_fee_cent="0.10"),
+        _option(code="PL", ship_from_country="PL", shipping_fee_cent="5.00"),
+    ])
+    assert picked is not None
+    assert picked["code"] == "PL"
+
+
+def test_pick_best_option_zero_priced_without_free_shipping_loses() -> None:
+    """AE occasionally returns 0 for bad data; without `free_shipping: True`
+    we treat it as +inf so it doesn't accidentally win."""
+    picked = _pick_best_option([
+        _option(code="ZERO_BAD", ship_from_country="CN",
+                shipping_fee_cent="0.00", free_shipping=False),
+        _option(code="REAL", ship_from_country="CN",
+                shipping_fee_cent="1.99", free_shipping=False),
+    ])
+    assert picked is not None
+    assert picked["code"] == "REAL"
 
 
 # ── Sanity ─────────────────────────────────────────────────────────────────
