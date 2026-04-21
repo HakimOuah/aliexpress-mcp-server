@@ -593,6 +593,52 @@ Utiliser `id` à la place de `sku_id` déclenche silencieusement `code: 501, msg
 - Cache TTL `cachetools` : retiré du scope (YAGNI — on ajoutera si le smoke test révèle un besoin de cache en amont).
 - Tuning `CONCURRENCY_LIMIT` : à ajuster quand on verra le comportement sous charge réelle.
 
+### 2026-04-21 — Phase 5 : Serveur MCP FastMCP
+
+**Objectif** : exposer le client + normalizer via un serveur MCP que le scout agent (Phase 8) appellera en HTTP.
+
+**Décisions structurantes** :
+
+1. **FastMCP v3.2.4** choisi (dernière release stable au 2026-04-14). API : décorateur `@mcp.tool` (sans parens, changement vs v2), `mcp.run(transport="http", host=..., port=...)`. Serveur Streamable HTTP sur `/mcp` par défaut — **pas `/`**, point de vigilance critique pour la Phase 8.
+
+2. **4 tools exposés** :
+   - **`search_and_normalize`** (primary, ~95% des appels scout) : pipeline complet text.search → product.get → freight.query → filtres passe-1, retourne des `DropPilotProduct` sérialisés en dict JSON-ready (17 clés top-level, dataclasses imbriquées recursivement).
+   - **`search_products_raw`** / **`get_product_detail`** / **`get_shipping_cost`** : passthroughs bruts sur les 3 endpoints IOP, pour debug et cas edge.
+   - Chaque tool wrappe `IOPError` → `RuntimeError` formaté `"IOPPermissionError | msg | request_id=..."` pour que le scout lise un message actionnable.
+
+3. **Client singleton lazy** : `AliExpressClient` créé au 1er tool call, fermé à l'arrêt serveur. Un seul pool de connexions httpx = moins de TLS handshakes. Test hooks `set_client_for_testing` / `reset_for_testing` pour injection mock sans toucher au `.env`.
+
+4. **Sérialisation** (`src/serializers.py`) : `dataclasses.asdict` recursif + conversion `datetime` → ISO 8601 string. Pas de sérialiseur custom sophistiqué — volontairement minimaliste, les noms de champs sont préservés 1:1 pour que le prompt scout matche le schema.
+
+5. **Logs tool-call** structurés (structlog) : `mcp.tool.call` avec `tool`, `status` (start / success / error), `duration_ms`, `result_count` ou `error`. Pas de paramètres sensibles loggés (pas d'access_token ni d'app_secret).
+
+**Tests (9 nouveaux, 200 total verts en 0.66 s)** :
+- Discovery : `list_tools()` retourne exactement les 4 tools attendus
+- Happy path `search_and_normalize` : toutes les clés du `DropPilotProduct` présentes, `sku_id` numérique, `fetched_at` ISO string
+- High-ticket propagation : un produit à 5.09€ → tool retourne `[]`
+- Erreurs IOP : `IOPAuthError` / `IOPPermissionError` remontent comme erreur MCP propre (pas de crash serveur)
+- Passthroughs bruts : items/details/freight transmis tels quels
+- Business error freight (`code: 501, DELIVERY_INFO_EMPTY`) passé tel quel — le tool n'interprète pas, c'est le scout qui décide skip/retry
+
+**Dockerisation** :
+- `Dockerfile` : `python:3.11-slim` (FastMCP requiert ≥ 3.10)
+- `docker-compose.yml` : port `127.0.0.1:8080:8080` (jamais exposé internet), réseau `hermes-network` externe partagé avec `hermes-agent-hjft_default`
+- `.env` injecté via `env_file` (pas copié dans l'image)
+- Pas de healthcheck encore — à pinner Phase 6 si besoin
+
+**Ménage venv** : suppression de l'ancien `.venv` Python 3.9 (héritage des phases 1-4 avant que FastMCP ne force le saut ≥ 3.10). Seul `.venv-311` reste. `.gitignore` étendu en glob `.venv*/` pour couvrir les deux.
+
+**Validation** : commandes de test documentées :
+- Auto : `.venv-311/bin/python -m pytest tests/`
+- Serveur local : `.venv-311/bin/python -m src.server` → Streamable HTTP `0.0.0.0:8080/mcp`
+- Client MCP : `fastmcp.Client("http://127.0.0.1:8080/mcp")` + `call_tool("search_and_normalize", {...})`
+- Inspector UI : `npx @modelcontextprotocol/inspector http://127.0.0.1:8080/mcp`
+
+**Différé** :
+- Auth MCP (réseau Docker interne uniquement pour l'instant — si plus tard public, ajouter middleware Bearer token)
+- Healthcheck Docker (attendre de pinner l'endpoint santé MCP standard)
+- Cache TTL `cachetools` (toujours YAGNI — on ajoute si smoke test révèle latence)
+
 ### [À compléter au fur et à mesure des sessions Claude Code]
 
 ---
