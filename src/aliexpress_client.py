@@ -177,7 +177,7 @@ class AliExpressClient:
         }
 
         envelope = await self._call_iop(METHOD_TEXT_SEARCH, business_params)
-        items = _extract_items(envelope)
+        items = _extract_items(envelope, METHOD_TEXT_SEARCH)
 
         filtered = _filter_items(
             items,
@@ -519,16 +519,25 @@ def _classify_ae_error(
     return IOPUpstreamError(f"IOP error: {display}", **base_kwargs)
 
 
-def _extract_items(envelope: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Pull the list of items out of a text.search envelope.
+def _extract_items(
+    envelope: Mapping[str, Any],
+    method: str = METHOD_TEXT_SEARCH,
+) -> list[dict[str, Any]]:
+    """Pull the list of items out of a search-style envelope.
 
-    Shape observed on the live API (2026-04-20):
+    Currently only `aliexpress.ds.text.search` is supported. Other
+    methods fall through to an empty list — extend the dispatch here
+    when we capture additional list-returning endpoints.
+
+    Shape observed on the live API (2026-04-20) for text.search:
         envelope["data"]["products"]["selection_search_product"] -> list[dict]
 
-    Defensive: any missing step returns []. The item schema (field
-    names) is preserved as-is — normalization to our internal Product
-    model happens in the Phase 4 normalizer.
+    Defensive: any missing / wrongly-typed step returns []. The item
+    schema (field names) is preserved as-is — normalization to our
+    internal Product model happens in the Phase 4 normalizer.
     """
+    if method != METHOD_TEXT_SEARCH:
+        return []
     data = envelope.get("data")
     if not isinstance(data, dict):
         return []

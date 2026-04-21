@@ -40,6 +40,7 @@ from src.aliexpress_client import (  # noqa: E402
     SORT_MAP,
     AliExpressClient,
     IOPError,
+    _extract_items,
 )
 from src.config import load_config  # noqa: E402
 
@@ -142,23 +143,76 @@ def _inner_envelope(outer: dict[str, Any], method: str) -> dict[str, Any]:
     return inner if isinstance(inner, dict) else {}
 
 
-def _extract_items_permissive(envelope: dict[str, Any]) -> list[dict[str, Any]]:
-    """Walk the envelope and pull any list-of-dicts that looks like items.
+def _extract_items_permissive(
+    envelope: dict[str, Any], *, max_depth: int = 6
+) -> list[dict[str, Any]]:
+    """Recursive fallback — returns the first list-of-dicts found at any
+    depth in the envelope.
 
-    Deliberately more permissive than the client's `_extract_items` —
-    on a live smoke test we want to see something even if our guessed
-    paths miss. Returns empty list if nothing matches."""
-    result = envelope.get("result") or envelope.get("resp_result", {}).get("result")
-    if not isinstance(result, dict):
-        return []
-    for value in result.values():
-        if isinstance(value, list) and value and isinstance(value[0], dict):
-            return [v for v in value if isinstance(v, dict)]
-        if isinstance(value, dict):
-            for inner in value.values():
-                if isinstance(inner, list) and inner and isinstance(inner[0], dict):
-                    return [v for v in inner if isinstance(v, dict)]
-    return []
+    Only used when the canonical extraction (`_extract_items`) returns
+    an empty list despite a populated envelope: typically means AE
+    changed the response shape. Walking the tree surfaces something
+    actionable on the smoke test instead of a blank result."""
+
+    def walk(node: Any, depth: int) -> list[dict[str, Any]] | None:
+        if depth > max_depth:
+            return None
+        if isinstance(node, list):
+            dicts = [x for x in node if isinstance(x, dict)]
+            return dicts if dicts else None
+        if isinstance(node, dict):
+            for value in node.values():
+                found = walk(value, depth + 1)
+                if found:
+                    return found
+        return None
+
+    return walk(envelope, 0) or []
+
+
+def _pick_items(
+    envelope: dict[str, Any], method: str
+) -> list[dict[str, Any]]:
+    """Canonical extraction first; permissive walker as diagnostic fallback."""
+    canonical = _extract_items(envelope, method)
+    if canonical:
+        return canonical
+    fallback = _extract_items_permissive(envelope)
+    if fallback:
+        print(
+            f"  ⚠ canonical path missed — permissive walker "
+            f"found {len(fallback)} items (investigate shape drift)"
+        )
+    return fallback
+
+
+def _describe_text_search_path(envelope: dict[str, Any]) -> None:
+    """Print which steps of `data.products.selection_search_product` exist
+    in the envelope. Makes shape mismatches obvious at a glance."""
+    print(f"  envelope keys                            : {sorted(envelope.keys())}")
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        kind = type(data).__name__ if data is not None else "missing"
+        print(f"  envelope['data']                         : {kind}")
+        return
+    print(f"  envelope['data'] keys                    : {sorted(data.keys())}")
+
+    products = data.get("products")
+    if not isinstance(products, dict):
+        kind = type(products).__name__ if products is not None else "missing"
+        print(f"  envelope['data']['products']             : {kind}")
+        return
+    print(f"  envelope['data']['products'] keys        : {sorted(products.keys())}")
+
+    items = products.get("selection_search_product")
+    if isinstance(items, list):
+        print(
+            f"  envelope[...]['selection_search_product']: "
+            f"list with {len(items)} items"
+        )
+    else:
+        kind = type(items).__name__ if items is not None else "missing"
+        print(f"  envelope[...]['selection_search_product']: {kind}")
 
 
 # ── Steps ───────────────────────────────────────────────────────────────────
@@ -225,6 +279,10 @@ async def step_text_search(
 
     print(f"  inner keys     : {sorted(envelope.keys())}")
 
+    # Debug: show which expected path steps exist in the envelope so a
+    # shape mismatch is visible without diffing JSON files.
+    _describe_text_search_path(envelope)
+
     if call_exc is not None:
         # HTTP round-trip succeeded and body was captured, but the
         # client raised (permission denied, etc.). We still expose the
@@ -236,15 +294,9 @@ async def step_text_search(
         )
         return None
 
-    items = _extract_items_permissive(envelope)
+    items = _pick_items(envelope, METHOD_TEXT_SEARCH)
     print(f"\n  items found    : {len(items)}")
     if not items:
-        # Log the structure so we can understand why nothing matched.
-        result = envelope.get("result") or envelope.get("resp_result", {}).get("result")
-        if isinstance(result, dict):
-            print(f"  result keys    : {sorted(result.keys())}")
-        else:
-            print(f"  result (raw)   : {truncate(result, 120)}")
         print(
             "  → inspect tests/fixtures/real_text_search_response.json "
             "to update _extract_items in src/aliexpress_client.py"
@@ -478,7 +530,7 @@ async def main() -> int:
             if search_env is None:
                 return 1
 
-            items = _extract_items_permissive(search_env)
+            items = _pick_items(search_env, METHOD_TEXT_SEARCH)
             if not items:
                 return 1
             # Real AE text.search items key is `itemId` (not `product_id`).

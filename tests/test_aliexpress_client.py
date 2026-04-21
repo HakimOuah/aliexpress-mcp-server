@@ -228,6 +228,28 @@ async def test_search_products_returns_items_with_stable_itemId(
         assert isinstance(item["itemId"], (str, int))
 
 
+async def test_search_products_extracts_from_real_fixture(
+    client: AliExpressClient, mock_http: AsyncMock
+) -> None:
+    """Regression guardrail: the full captured IOP response (3 items)
+    must yield 3 items with the exact itemIds seen live.
+
+    Locks the canonical path `data.products.selection_search_product`
+    against accidental refactors that break it — a bug initially missed
+    by the permissive smoke-test walker.
+    """
+    _prime(mock_http, load_fixture("real_text_search_response.json"))
+
+    items = await client.search_products(
+        query="yoga mat", max_results=3, target_country="FR"
+    )
+
+    assert len(items) == 3
+    assert items[0]["itemId"] == "1005006361450153"
+    assert items[1]["itemId"] == "1005005993007395"
+    assert items[2]["itemId"] == "1005008131052613"
+
+
 async def test_search_products_uses_page_size_equal_to_max_results(
     client: AliExpressClient, mock_http: AsyncMock
 ) -> None:
