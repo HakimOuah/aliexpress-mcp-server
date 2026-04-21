@@ -4,13 +4,30 @@ services:
     container_name: aliexpress-mcp
     restart: unless-stopped
     env_file: .env
+
     ports:
-      # Localhost binding only — the scout agent and Hermes reach the
+      # Localhost-only binding — the scout agent and Hermès reach the
       # server via the Docker network DNS name `aliexpress-mcp:8080`,
       # never through the public interface.
       - "127.0.0.1:8080:8080"
+
     networks:
       - hermes-network
+
+    # Resource guardrails — the VPS also hosts Hermès and Traefik, so
+    # cap our footprint to stay predictable. Tune up if we hit OOM.
+    mem_limit: 512m
+    cpus: "0.5"
+
+    # Healthcheck lives in the Dockerfile (shared with direct
+    # `docker run` invocations). Compose inherits it automatically.
+
+    # Bounded log volume (10 Mo × 3 files = 30 Mo max per container).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   hermes-network:
