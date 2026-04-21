@@ -1,8 +1,14 @@
-"""Modèles de données du projet."""
+"""Modèles de données du projet.
+
+Le normalizer Phase 4 prend les payloads bruts IOP (dict) et renvoie
+des `DropPilotProduct` immuables, qualitativement filtrés. Le scoring
+marge et la recherche concurrentielle ne sont pas faits ici — ils
+appartiennent au scout agent (Phase 8).
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
@@ -13,55 +19,115 @@ class Verdict(Enum):
     KILL = "KILL"
 
 
-@dataclass
+@dataclass(frozen=True)
+class SkuRef:
+    """SKU de référence utilisé pour le scoring.
+
+    Sélectionné par le normalizer comme la variante la moins chère
+    (`offer_sale_price_eur`) parmi celles ayant `available_stock >= 1`.
+    """
+
+    sku_id: str
+    """Identifiant numérique AE — à utiliser pour `aliexpress.ds.freight.query`.
+    Ne PAS confondre avec `sku_attr` (combinaison d'attributs d'affichage)."""
+
+    sku_attr: str
+    """Chaîne de propriétés combinées, ex ``"14:29#Bear;183:200007741"``."""
+
+    offer_sale_price_eur: float
+    """Prix dropshipper (celui qu'on paye AE), TTC EUR."""
+
+    sku_price_eur: float
+    """Prix retail AE affiché (référence publique), TTC EUR."""
+
+    currency_code: str
+
+    available_stock: int
+
+    sku_properties: dict[str, str]
+    """Map nom-propriété → valeur, ex ``{"Couleur": "Gris clair", "Spécification": "400MMx600MM"}``."""
+
+    sku_image_url: str | None
+
+
+@dataclass(frozen=True)
+class StoreInfo:
+    store_id: int
+    store_name: str
+    store_country_code: str
+    shipping_speed_rating: float
+    communication_rating: float
+    item_as_described_rating: float
+
+
+@dataclass(frozen=True)
 class ShippingInfo:
     country_code: str
     cost_eur: float
-    delivery_days_min: int
-    delivery_days_max: int
-    carrier: str
-    is_tracked: bool
+    cost_format: str
+    currency: str
+    min_delivery_days: int
+    max_delivery_days: int
+    delivery_date_desc: str
+    ship_from_country: str
+    is_eu_warehouse: bool
+    tracking: bool
+    company: str
+    shipping_code: str
+    free_shipping: bool
 
 
-@dataclass
-class Product:
-    # Identité
+@dataclass(frozen=True)
+class PackageInfo:
+    weight_kg: float
+    length_cm: int
+    width_cm: int
+    height_cm: int
+
+
+@dataclass(frozen=True)
+class DropPilotProduct:
+    # Identifiants
     product_id: str
+    source: str
+
+    # Base info
     title: str
+    subject: str
+    category_id: int | None
     product_url: str
-    image_url: str
-    additional_images: list[str] = field(default_factory=list)
-
-    # Pricing (toujours en EUR après conversion)
-    price_eur: float = 0.0
-    original_price_eur: float | None = None
-    discount_pct: float | None = None
-
-    # Shipping par pays
-    shipping_eur_fr: float | None = None
-    shipping_eur_be: float | None = None
-    shipping_eur_ch: float | None = None
-    shipping_eur_lu: float | None = None
-    shipping_days_fr: int | None = None
+    main_image_url: str
+    image_urls: list[str]
 
     # Qualité
-    rating: float = 0.0
-    review_count: int = 0
-    order_count: int = 0
+    rating: float
+    evaluate_rate_pct: float
+    order_count: int
+    evaluation_count: int
+    is_aliexpress_choice: bool
 
-    # Fournisseur
-    seller_id: str = ""
-    seller_name: str = ""
-    seller_rating_pct: float | None = None
-    seller_country: str | None = None
+    # Références SKU
+    sku_ref: SkuRef
+    all_skus: list[SkuRef]
+    sku_ref_is_cheapest_absolute: bool
+    """True quand `sku_ref` est la variante la moins chère dans l'absolu
+    (toutes SKUs confondues, en stock ou non). False quand on a fallback
+    sur une variante plus chère parce que la vraie moins chère est OOS —
+    signal utile au scout : la marge réelle est potentiellement moins
+    attrayante que ce que suggère le prix d'affichage de text.search."""
 
-    # Scoring DropPilot (calculé)
-    suggested_retail_price_eur: float = 0.0
-    margin_estimate_fr: float = 0.0
-    margin_pct_fr: float = 0.0
-    verdict: Verdict = Verdict.KILL
-    verdict_reason: str = ""
+    # Vendeur
+    store: StoreInfo
+
+    # Logistique — None par défensivité, mais tout produit retourné par
+    # le normalizer a un `shipping_fr` rempli (filtre passe-1 obligatoire).
+    shipping_fr: ShippingInfo | None
+
+    # Package — None toléré si AE n'a pas renseigné les dimensions.
+    package: PackageInfo | None
+
+    # Filtres passés (ordre d'application), pour debug / audit.
+    passed_filters: list[str]
 
     # Méta
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
-    source: str = "aliexpress"
+    fetched_at: datetime
