@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import load_fixture
+
 from src.aliexpress_client import (
     METHOD_FREIGHT_QUERY,
     METHOD_PRODUCT_GET,
@@ -202,3 +204,36 @@ def test_parse_float_rejects_comma_decimal() -> None:
 )
 def test_parse_eur(raw: object, expected: float) -> None:
     assert _parse_eur(raw) == pytest.approx(expected)
+
+
+# --- SKU id extraction (regression: sku_id vs sku_attr) ---------------------
+
+
+def test_first_sku_id_is_numeric_not_sku_attr() -> None:
+    """Regression guardrail for the 2026-04-21 DELIVERY_INFO_EMPTY bug.
+
+    A SKU dict returned by product.get has three similarly-named
+    fields (`id`, `sku_attr`, `sku_id`), only `sku_id` is the numeric
+    identifier that freight.query accepts. The first smoke test chain
+    passed `id` (= sku_attr) and AE silently returned code 501.
+
+    This test loads the real product.get capture and asserts the three
+    fields contain what they should — any code that extracts the wrong
+    one will be caught here before the smoke test fails.
+    """
+    outer = load_fixture("real_product_get_response.json")
+    inner = outer["aliexpress_ds_product_get_response"]
+    result = inner["result"]
+    skus = result["ae_item_sku_info_dtos"]["ae_item_sku_info_d_t_o"]
+    first_sku = skus[0]
+
+    # The correct value — 17-digit numeric AE identifier.
+    assert first_sku["sku_id"] == "12000044126059467"
+    assert first_sku["sku_id"].isdigit()
+
+    # The trap — both "id" and "sku_attr" hold the property-combination
+    # string, which AE's freight.query rejects with code 501.
+    assert first_sku["id"] == "14:29#Bear;183:200007741"
+    assert first_sku["sku_attr"] == "14:29#Bear;183:200007741"
+    assert first_sku["id"] == first_sku["sku_attr"]  # confirmed aliases
+    assert not first_sku["id"].isdigit()

@@ -1,0 +1,270 @@
+{
+  "aliexpress_ds_product_get_response": {
+    "result": {
+      "ae_item_sku_info_dtos": {
+        "ae_item_sku_info_d_t_o": [
+          {
+            "sku_attr": "14:29#Bear;183:200007741",
+            "offer_sale_price": "8.01",
+            "sku_id": "12000044126059467",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "22.23",
+            "offer_bulk_sale_price": "8.01",
+            "sku_available_stock": 27,
+            "id": "14:29#Bear;183:200007741",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "BLANC",
+                  "sku_image": "https://ae01.alicdn.com/kf/Sd1753df6e0b84689b8bfc96923568182z.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Bear",
+                  "property_value_id": 29,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "500MMx800MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007741,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          },
+          {
+            "sku_attr": "14:29#Bear;183:200007736",
+            "offer_sale_price": "5.19",
+            "sku_id": "12000044126059466",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "14.03",
+            "offer_bulk_sale_price": "5.19",
+            "sku_available_stock": 6,
+            "id": "14:29#Bear;183:200007736",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "BLANC",
+                  "sku_image": "https://ae01.alicdn.com/kf/Sd1753df6e0b84689b8bfc96923568182z.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Bear",
+                  "property_value_id": 29,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "400MMx600MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007736,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          },
+          {
+            "sku_attr": "14:366#Dog;183:200007741",
+            "offer_sale_price": "8.19",
+            "sku_id": "12000044126059465",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "22.75",
+            "offer_bulk_sale_price": "8.19",
+            "sku_available_stock": 6,
+            "id": "14:366#Dog;183:200007741",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "Jaune",
+                  "sku_image": "https://ae01.alicdn.com/kf/S7734a228621e4e80908493b24a459fd4s.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Dog",
+                  "property_value_id": 366,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "500MMx800MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007741,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          },
+          {
+            "sku_attr": "14:366#Dog;183:200007736",
+            "offer_sale_price": "5.09",
+            "sku_id": "12000044126059464",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "13.77",
+            "offer_bulk_sale_price": "5.09",
+            "sku_available_stock": 7,
+            "id": "14:366#Dog;183:200007736",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "Jaune",
+                  "sku_image": "https://ae01.alicdn.com/kf/S7734a228621e4e80908493b24a459fd4s.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Dog",
+                  "property_value_id": 366,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "400MMx600MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007736,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          },
+          {
+            "sku_attr": "14:200006151#Cat;183:200007741",
+            "offer_sale_price": "8.19",
+            "sku_id": "12000044126059463",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "22.75",
+            "offer_bulk_sale_price": "8.19",
+            "sku_available_stock": 4,
+            "id": "14:200006151#Cat;183:200007741",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "Gris clair",
+                  "sku_image": "https://ae01.alicdn.com/kf/S0fff4847703d488eadd1c31f7a83184ax.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Cat",
+                  "property_value_id": 200006151,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "500MMx800MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007741,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          },
+          {
+            "sku_attr": "14:200006151#Cat;183:200007736",
+            "offer_sale_price": "5.19",
+            "sku_id": "12000044126059462",
+            "price_include_tax": true,
+            "currency_code": "EUR",
+            "sku_price": "14.03",
+            "offer_bulk_sale_price": "5.19",
+            "sku_available_stock": 83,
+            "id": "14:200006151#Cat;183:200007736",
+            "ae_sku_property_dtos": {
+              "ae_sku_property_d_t_o": [
+                {
+                  "sku_property_value": "Gris clair",
+                  "sku_image": "https://ae01.alicdn.com/kf/S0fff4847703d488eadd1c31f7a83184ax.jpg",
+                  "sku_property_name": "Couleur",
+                  "property_value_definition_name": "Cat",
+                  "property_value_id": 200006151,
+                  "sku_property_id": 14
+                },
+                {
+                  "sku_property_value": "400MMx600MM",
+                  "sku_property_name": "Spécification",
+                  "property_value_id": 200007736,
+                  "sku_property_id": 183
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "ae_multimedia_info_dto": {
+        "image_urls": "https://ae01.alicdn.com/kf/S7734a228621e4e80908493b24a459fd4s.jpg;https://ae01.alicdn.com/kf/Sd62acdd4f96744a09612011937a7db5dm.png;https://ae01.alicdn.com/kf/S94dd94732f3143c9a95401285b42a7d1J.jpg;https://ae01.alicdn.com/kf/S45a37b0d72bb449f85f30f5a51d2ca10E.jpg;https://ae01.alicdn.com/kf/Sff2a26e59ea84198ac1cbda9e325decbH.jpg;https://ae01.alicdn.com/kf/Sc5b6bebef8894cbfae952064f29cec83K.png"
+      },
+      "package_info_dto": {
+        "package_width": 27,
+        "package_height": 7,
+        "package_length": 39,
+        "gross_weight": "0.213",
+        "package_type": false,
+        "product_unit": 100000015
+      },
+      "logistics_info_dto": {
+        "delivery_time": 7,
+        "ship_to_country": "FR"
+      },
+      "product_id_converter_result": {
+        "main_product_id": 1005008177221739,
+        "sub_product_id": "{\"US\":3256807990906987}"
+      },
+      "ae_item_base_info_dto": {
+        "mobile_detail": "{\"version\":\"2.0.0\",\"moduleList\":[]}",
+        "subject": "Tapis de sol absorbant épais de forme spéciale pour salle de bain, tapis de toilette en flanelle, salle de douche, tapis de pied antidérapant et résistant à la saleté",
+        "evaluation_count": "1446",
+        "sales_count": "5000+",
+        "product_status_type": "onSelling",
+        "avg_evaluation_rating": "4.6",
+        "separated_listing": false,
+        "currency_code": "CNY",
+        "sl_product": false,
+        "category_id": 154002,
+        "product_id": 1005008177221739,
+        "detail": "<div>detail HTML truncated for fixture</div>"
+      },
+      "manufacturer_info": {
+        "address": "4th floor, No, 392, Wuxiang East Road, Wuxiang Town, Yinzhou District, Ningbo, Zhejiang, China",
+        "phone": "17855822907",
+        "country_name": "China",
+        "email": "17855822907@163.com",
+        "phone_prefix": "86"
+      },
+      "has_whole_sale": false,
+      "ae_item_properties": {
+        "ae_item_property": [
+          {
+            "attr_name_id": 2,
+            "attr_value_id": 201512802,
+            "attr_name": "Nom de marque",
+            "attr_value": "NONE"
+          },
+          {
+            "attr_name_id": 219,
+            "attr_value_id": 9441741844,
+            "attr_name": "Origine",
+            "attr_value": "CN (Origine)"
+          },
+          {
+            "attr_name_id": 10,
+            "attr_value_id": -1,
+            "attr_name": "Matériau",
+            "attr_value": "Polyester"
+          },
+          {
+            "attr_name_id": 263,
+            "attr_value_id": 7544,
+            "attr_name": "Techniques",
+            "attr_value": "FAIT À LA MACHINE"
+          },
+          {
+            "attr_name_id": -1,
+            "attr_name": "Choice",
+            "attr_value": "yes"
+          }
+        ]
+      },
+      "ae_store_info": {
+        "store_id": 1102602078,
+        "shipping_speed_rating": "4.7",
+        "communication_rating": "4.6",
+        "store_name": "Shop1102602078 Store",
+        "store_country_code": "CN",
+        "item_as_described_rating": "4.5"
+      }
+    },
+    "rsp_code": 200,
+    "rsp_msg": "Call succeeds",
+    "request_id": "2101546d17767599114785865",
+    "_trace_id_": "2140d36217767599114756478e0fcf"
+  }
+}

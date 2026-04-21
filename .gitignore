@@ -29,13 +29,16 @@ htmlcov/
 .coverage
 tests/reports/
 
-# Live-captured IOP responses from smoke test — may contain PII / store
-# identifiers. Keep local until Phase 4 decides whether to commit
-# sanitized versions as regression fixtures.
+# Live-captured IOP responses from smoke test. Default to ignored
+# because future captures may contain PII or transient identifiers.
 tests/fixtures/real_*.json
-# Exception: the text.search capture is public data (item listings) and
-# serves as the canonical shape reference for _extract_items.
+# Exceptions: the three endpoint captures below are committed as
+# canonical shape references for _extract_items and the Phase 4
+# normalizer. They contain no secrets (public listings + a public
+# business-error payload).
 !tests/fixtures/real_text_search_response.json
+!tests/fixtures/real_product_get_response.json
+!tests/fixtures/real_freight_query_response.json
 
 # OS
 .DS_Store

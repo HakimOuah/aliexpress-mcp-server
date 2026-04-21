@@ -1,0 +1,11 @@
+{
+  "aliexpress_ds_freight_query_response": {
+    "result": {
+      "msg": "DELIVERY_INFO_EMPTY",
+      "code": 501,
+      "success": false
+    },
+    "request_id": "210110a217767599119526327",
+    "_trace_id_": "2140d36217767599119516488e0fcf"
+  }
+}

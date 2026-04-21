@@ -397,7 +397,11 @@ async def step_product_get(
     if sku_list and isinstance(sku_list[0], dict):
         first_sku = sku_list[0]
         print(f"  SKU[0] keys    : {sorted(first_sku.keys())}")
-        print(f"  SKU[0] id      : {first_sku.get('id')}")
+        # `sku_id` is the numeric AE identifier (the right one for freight);
+        # `id` is an alias of `sku_attr` (property combination string).
+        # Show both side-by-side to make the difference visible.
+        print(f"  SKU[0] sku_id  : {first_sku.get('sku_id')}  ← use this for freight")
+        print(f"  SKU[0] id      : {first_sku.get('id')}  (alias of sku_attr, NOT for freight)")
         print(f"  SKU[0] price   : {first_sku.get('sku_price')}")
 
     return envelope
@@ -556,8 +560,11 @@ async def main() -> int:
 
             first_sku_id: str | None = None
             if sku_list and isinstance(sku_list[0], dict):
+                # `sku_id` (numeric) is what AE expects; `id` is the
+                # sku_attr property string and triggers a silent 501
+                # DELIVERY_INFO_EMPTY when passed as selectedSkuId.
                 first_sku_id = (
-                    sku_list[0].get("id") or sku_list[0].get("sku_id")
+                    sku_list[0].get("sku_id") or sku_list[0].get("id")
                 )
 
             if not first_sku_id:

@@ -218,24 +218,40 @@ class AliExpressClient:
     ) -> dict[str, Any]:
         """Freight lookup via `aliexpress.ds.freight.query`.
 
-        `sku_id` is **mandatory** — AE rejects requests without a
-        `selectedSkuId` and the error messages are opaque. Never pass
-        an arbitrary value: always source `sku_id` from a prior
-        `get_product_details` call.
+        `sku_id` is **mandatory** — AE rejects requests without a valid
+        `selectedSkuId` silently (HTTP 200, but a business-error body:
+        ``{code: 501, msg: "DELIVERY_INFO_EMPTY", success: false}``).
+        Never pass an arbitrary value: always source `sku_id` from a
+        prior `get_product_details` call.
+
+        WARNING — each SKU dict from product.get has THREE similarly-
+        named fields which are NOT interchangeable::
+
+            "id":       "14:29#Bear;183:200007741"   # sku_attr alias — DO NOT USE
+            "sku_attr": "14:29#Bear;183:200007741"   # property combination string
+            "sku_id":   "12000044126059467"          # numeric id — use this one
+
+        Using `id` (or `sku_attr`) where `sku_id` is expected yields
+        the 501 DELIVERY_INFO_EMPTY error above. Confirmed live
+        2026-04-21 — AliExpress does not differentiate in the error
+        message, so the bug is silent unless you know the pattern.
 
         Workflow::
 
             items = await client.search_products("yoga mat")
-            details = await client.get_product_details(items[0]["product_id"])
-            sku_id = details["ae_item_sku_info_dtos"][0]["id"]  # or pick another
+            details = await client.get_product_details(items[0]["itemId"])
+            sku = details["ae_item_sku_info_dtos"]["ae_item_sku_info_d_t_o"][0]
+            sku_id = sku["sku_id"]  # NOT sku["id"]
             freight = await client.get_shipping_cost(
-                product_id=items[0]["product_id"],
+                product_id=items[0]["itemId"],
                 sku_id=sku_id,
                 country_code="FR",
             )
 
-        Returns the raw freight `result` dict (shipping methods list,
-        delivery time, cost).
+        Returns the raw freight `result` dict. Callers must inspect
+        `result.get("success")`: AE returns HTTP 200 with a business-
+        error body when the SKU is unknown, when the combination
+        product+sku+country isn't serviceable, etc.
         """
         # The API takes a single param `queryDeliveryReq` whose value
         # is a JSON string — not a nested object. Wrong type or missing
