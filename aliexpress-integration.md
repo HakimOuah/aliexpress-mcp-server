@@ -353,6 +353,102 @@ Pour une v2 : exporter vers Grafana Loki ou similar si Hakim veut un vrai dashbo
 | Timeout réseau | 3 retries avec backoff, puis erreur |
 | Résultat vide | Retourner liste vide avec log info |
 
+## 📋 Shape des réponses IOP (référence)
+
+Captures live validées **2026-04-21** via `scripts/smoke_test.py`. Les trois fichiers fixture sont commités dans `tests/fixtures/real_*.json` comme référence permanente pour le normalizer Phase 4 et comme tests de régression contre toute dérive de shape.
+
+### `aliexpress.ds.text.search`
+
+- **Fixture** : `tests/fixtures/real_text_search_response.json`
+- **Path d'extraction** : `envelope["data"]["products"]["selection_search_product"]` → `list[dict]`
+- **Success marker** : `envelope["code"] == "00"` (**string**, pas `"0"` ni `0`)
+
+Champs clés par item :
+
+| Champ | Type | Exemple | Usage Phase 4 |
+|---|---|---|---|
+| `itemId` | str (16 digits) | `"1005006361450153"` | identité produit, stable |
+| `title` | str | `"Tapis de litière pour chat..."` | titre FR |
+| `targetSalePrice` | str (dot-decimal) | `"3.29"` | prix EUR machine-readable |
+| `salePriceFormat` | str | `"3,29€"` | prix EUR localisé affichage |
+| `score` | str (0-5 scale) | `"4.5"` | rating |
+| `evaluateRate` | str (%) | `"89.2"` | % reviews positives |
+| `orders` | str (format humain) | `"5,000+"` | volume ventes (parser avec `_parse_order_count`) |
+| `itemMainPic` | str URL | `"https://ae01.alicdn.com/kf/..."` | image principale |
+| `itemUrl` | str (relative) | `"//www.aliexpress.com/item/...html?skuId=..."` | URL produit |
+| `originMinPrice` | str (JSON embedded) | `"{\"cent\":329,...}"` | payload formatage prix |
+| `discount` | str | `"0%"` | remise affichée |
+
+⚠️ **Piège** : `targetSalePrice` reflète le **SKU le moins cher** du produit. Pour le vrai prix facturé sur un SKU donné, passer par `product.get`.
+
+### `aliexpress.ds.product.get`
+
+- **Fixture** : `tests/fixtures/real_product_get_response.json`
+- **Path d'extraction** : `envelope["result"]` → `dict` structuré
+- **Success marker** : `envelope["rsp_code"] == 200` (**int**, différent de text.search)
+
+Sous-sections :
+
+| Section | Type | Contenu |
+|---|---|---|
+| `ae_item_base_info_dto` | dict | `product_id`, `subject`, `avg_evaluation_rating`, `evaluation_count`, `sales_count`, `product_status_type` (`"onSelling"`), `category_id`, `currency_code` (**CNY** au niveau base, EUR sur les SKUs) |
+| `ae_item_sku_info_dtos.ae_item_sku_info_d_t_o` | list[dict] | N variantes avec `sku_id`, `offer_sale_price` (EUR dropshipper), `sku_price` (EUR retail), `sku_available_stock`, `price_include_tax: true`, `ae_sku_property_dtos` |
+| `ae_store_info` | dict | `store_id`, `store_name`, `shipping_speed_rating`, `communication_rating`, `item_as_described_rating`, `store_country_code` |
+| `logistics_info_dto` | dict | `delivery_time` (int jours), `ship_to_country` |
+| `package_info_dto` | dict | `package_width/height/length` (cm, int), `gross_weight` (str kg) |
+| `ae_multimedia_info_dto` | dict | `image_urls` (str, URLs séparées par `;`) |
+| `ae_item_properties.ae_item_property` | list[dict] | attributs produit ; inclut flag `{"attr_name": "Choice", "attr_value": "yes"}` ← indicateur AliExpress Choice (logistique premium) |
+| `manufacturer_info` | dict | adresse + email + téléphone fabricant CN |
+
+⚠️ **Piège SKU** — chaque SKU a **trois champs similaires**, non interchangeables :
+
+```
+"id":       "14:29#Bear;183:200007741"   ← alias de sku_attr, NE PAS utiliser
+"sku_attr": "14:29#Bear;183:200007741"   ← combinaison d'attributs pour affichage
+"sku_id":   "12000044126059467"          ← identifiant numérique AE, POUR freight.query
+```
+
+Utiliser `id` à la place de `sku_id` déclenche silencieusement `code: 501, msg: "DELIVERY_INFO_EMPTY"` côté freight. Test de régression : `tests/test_aliexpress_client_helpers.py::test_first_sku_id_is_numeric_not_sku_attr`.
+
+### `aliexpress.ds.freight.query`
+
+- **Fixture (cas erreur)** : `tests/fixtures/real_freight_query_response.json`
+- **Path d'extraction** : `envelope["result"]` → `dict` à inspecter via `result["success"]`
+
+**Cas succès** (observé live sur produit livrable FR) :
+
+```json
+{
+  "result": {
+    "success": true,
+    "aeop_freight_calculate_result_for_buyer_dtolist": [
+      {
+        "service_name": "Cainiao Fulfillment",
+        "estimated_delivery_time": "7-9",
+        "tracking_available": "true",
+        "freight": {"amount": "1.99", "cent": 199, "currency_code": "EUR"}
+      }
+    ]
+  }
+}
+```
+
+**Cas erreur métier** (HTTP 200 + `result.success: false`) :
+
+```json
+{
+  "result": {
+    "success": false,
+    "code": 501,
+    "msg": "DELIVERY_INFO_EMPTY"
+  }
+}
+```
+
+⚠️ AE renvoie HTTP **200** même en cas d'erreur métier (SKU invalide, produit non livrable sur le pays, etc.). Le normalizer Phase 4 **doit** inspecter `result["success"]` avant d'accéder à la liste de méthodes de shipping.
+
+---
+
 ## 📝 Journal d'avancement
 
 ### 2026-04-18 — Kick-off
@@ -415,6 +511,41 @@ Pour une v2 : exporter vers Grafana Loki ou similar si Hakim veut un vrai dashbo
   - Cas nominal et erreurs `get_product_details` (not found → `ProductsNotFound`, upstream → `UpstreamError`)
   - Stub `get_shipping_cost` → `NotImplementedError`
 - **17/17 tests verts en 0.04s, aucun appel réseau réel à AE**
+
+### 2026-04-20 → 2026-04-21 — Phase 3bis : refactor HTTP direct (Drop Shipping API)
+
+**Contexte** : le premier smoke test live de la Phase 3 a révélé une incompatibilité majeure. Le SDK `python-aliexpress-api` (de `sergioteula`) n'expose que les endpoints **Affiliate** (`aliexpress.affiliate.product.query`), alors que notre app AE est de type **Drop Shipping** (permission Affiliate refusée à l'enregistrement). Résultat : `InsufficientPermission` sur chaque appel.
+
+**Décision structurante** : abandon complet du SDK tiers, réécriture du client avec des appels HTTP directs à la gateway IOP (`https://api-sg.aliexpress.com/sync`), en réutilisant la logique de signature HMAC-SHA256 déjà validée en Phase 2 pour OAuth.
+
+**Travail réalisé (6 commits) :**
+
+1. **`src/iop_signature.py`** : module partagé avec 3 fonctions pures (`sign_business_request`, `sign_system_request`, `build_business_system_params`). 20 tests unitaires avec vecteurs golden HMAC-SHA256 + test de parité contre l'ancienne implémentation inline de `ae_oauth.py`.
+2. **Refactor `scripts/ae_oauth.py`** pour consommer `iop_signature`. Parité bit-à-bit vérifiée sur payload OAuth réaliste, zéro changement de comportement observable.
+3. **Réécriture complète `src/aliexpress_client.py`** : façade async sur `httpx.AsyncClient` avec `_call_iop(method, business_params)` centralisé (sign + POST form-urlencoded + parse JSON + classification erreur). Hiérarchie d'exceptions typées (`IOPAuthError`, `IOPRateLimitError`, `IOPPermissionError`, `IOPUpstreamError`, `IOPNetworkError`) avec wrap du `request_id` AE pour debug console. 3 endpoints exposés : `search_products` (text.search), `get_product_details` (product.get), `get_shipping_cost` (freight.query).
+4. **Smoke test instrumenté** (`scripts/smoke_test.py`) : `TeeingAsyncClient` qui wrap `httpx.AsyncClient` pour dumper la réponse brute **avant** parsing/classification → on ne perd jamais la payload même en cas d'exception en aval. Chain des 3 endpoints avec gestion d'erreur fine par étape.
+5. **Découverte de la shape réelle** au 1er run live réussi :
+   - text.search : items sous `data.products.selection_search_product` (pas de clé `result`), success code `"00"` (pas `"0"` ni `200`), items exposent `itemId` / `targetSalePrice` / `score` / `orders` (format `"5,000+"`).
+   - product.get : 6 SKUs par produit, 3 champs similaires `id` / `sku_attr` / `sku_id` dont seul `sku_id` (numérique) est valide pour freight.
+   - freight.query : retourne HTTP 200 avec `result.success: false` en cas d'erreur métier → pas une exception, un cas à normaliser.
+6. **3 fixtures réelles commitées** dans `tests/fixtures/real_*.json` comme référence permanente pour le normalizer Phase 4 et guardrails de régression contre une éventuelle dérive de shape.
+
+**Bugs corrigés en cascade** (chacun avec son test de régression) :
+- Extraction : path `data.products.selection_search_product` remplace la stratégie "guessing" initiale → `test_search_products_extracts_from_real_fixture`
+- Success codes : `_SUCCESS_CODES = {"0", "00", "200"}` + comparaison sur `str(value)` accepte int `0` et `200`
+- SKU id : le smoke test extrayait `id` (= `sku_attr`) au lieu de `sku_id`, déclenchant `code: 501, msg: "DELIVERY_INFO_EMPTY"` silencieux → `test_first_sku_id_is_numeric_not_sku_attr`
+
+**État final Phase 3bis** :
+- **119 tests** passent (unit + régression sur vraies données) en 0.10 s
+- **Smoke test live 3/3 endpoints validés** : text.search (3 items FR/EUR) → product.get (6 SKUs, rating 4.6, store_info, logistics FR, flag "Choice") → freight.query (Cainiao Fulfillment, 1.99€, 7-9 jours, tracké)
+- Classification d'erreurs tolérante aux variantes de formulation AE (`InvalidSession`, `SessionExpired`, `APP_CALL_LIMITED`, `Forbidden`, etc.) via markers case-insensitive + codes numériques stables
+- Documentation embarquée : docstring `get_shipping_cost` contient le workflow pseudo-code complet + warning sur le piège `id` vs `sku_id`
+
+**Décisions reportées en Phase 4** :
+- Pagination pour garantir `max_results` après filtrage client-side (TODO commenté dans `search_products`)
+- `ship_to_country` paramétrable (actuellement hardcodé `"FR"` dans `get_product_details`)
+- Mapping `sort_by` : `"orders,desc"` validé en live, alternatives `"orders_desc"` / `"LAST_VOLUME,desc"` documentées comme fallback manuel si AE change
+- Normalizer : conversion `dict[str, Any]` brut → `Product` dataclass avec scoring DropPilot (PASS / WATCH / KILL)
 
 ### [À compléter au fur et à mesure des sessions Claude Code]
 

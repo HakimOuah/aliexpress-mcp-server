@@ -189,10 +189,11 @@ aliexpress-mcp-server/
 - [x] App Key + App Secret récupérés et stockés en sécurité
 - [x] IP VPS ajoutée à la whitelist AE (148.230.118.152)
 - [x] Callback URL définie : `https://srv1575867.hstgr.cloud/oauth/aliexpress/callback`
-- [ ] Structure projet créée
-- [ ] Flow OAuth réalisé → access_token + refresh_token obtenus
-- [ ] MCP server développé (client, cache, normalizer, server)
-- [ ] Tests unitaires
+- [x] Structure projet créée
+- [x] Flow OAuth réalisé → access_token + refresh_token obtenus
+- [ ] MCP server développé (client ✅, cache / normalizer / server en Phase 4-5)
+- [x] Tests unitaires (119 tests, client + signature + helpers)
+- [x] Client Drop Shipping validé en live (3 endpoints : text.search, product.get, freight.query)
 - [ ] Dockerisation
 - [ ] Déploiement VPS
 - [ ] Managed Agent `aliexpress-scout` créé via API Anthropic
