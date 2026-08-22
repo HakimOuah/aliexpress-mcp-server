@@ -4,26 +4,34 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from statistics import median
 from typing import Any
 
 
-USED_HINTS = ("occasion", "used", "seconde main", "second hand", "reconditionné", "refurbished")
+USED_HINTS = ("occasion", "used", "seconde main", "second hand", "reconditionne", "refurbished")
 ACCESSORY_HINTS = (
     "tondeuse", "trimmer", "rasoir", "cadre", "frame", "fil", "yarn", "thread",
     "toile", "tissu", "cloth", "fabric", "aiguille", "needle", "ciseaux", "scissors",
-    "pièce", "spare", "cotton", "coton", "wool", "laine", "strand", "strands",
+    "piece", "spare", "cotton", "coton", "wool", "laine", "strand", "strands",
     "brin", "brins", "threader", "enfileur", "backing", "glue", "colle",
 )
-BUNDLE_HINTS = ("kit", "starter", "démarrage", "set", "ensemble", "pack", "bundle")
+BUNDLE_HINTS = ("kit", "starter", "demarrage", "set", "ensemble", "pack", "bundle")
 PRO_HINTS = ("professionnel", "professional", "industrial", "industriel", "pneumatic", "pneumatique")
+
+_TUFTING_DEVICE_HINTS = (
+    "gun", "pistolet", "machine", "touffeter", "tufter", "electric", "electrique",
+    "brushless", "sans brosse", "ak-v", "ak v", "ak-i", "ak i", "ak duo",
+    "cut pile", "loop pile", "cut loop",
+)
 
 
 def _norm(text: object) -> str:
-    s = str(text or "").lower()
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    s = unicodedata.normalize("NFKD", str(text or "").lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _is_tufting_family(target_terms: list[str]) -> bool:
@@ -31,13 +39,17 @@ def _is_tufting_family(target_terms: list[str]) -> bool:
     return "tuft" in joined or "touff" in joined
 
 
-def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
-    """Reject manual tufting tools when the requested opportunity is a gun/machine.
+def _is_tufting_device_offer(text: str, target_terms: list[str]) -> bool:
+    """Recognize translated tufting-machine titles without exact alias matching."""
+    if not _is_tufting_family(target_terms):
+        return False
+    has_anchor = "tuft" in text or "touff" in text
+    has_device = any(hint in text for hint in _TUFTING_DEVICE_HINTS)
+    return has_anchor and has_device
 
-    Manual punch-style tufting tools can be valid products in their own right, but
-    they are not price-comparable with electric/pneumatic tufting machines. If the
-    caller explicitly includes ``manual`` in the target aliases, they remain valid.
-    """
+
+def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
+    """Reject manual tufting tools when the requested opportunity is powered."""
     if not _is_tufting_family(target_terms):
         return False
     target_text = " ".join(_norm(term) for term in target_terms)
@@ -46,7 +58,7 @@ def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
     if "manual" not in text and "manuel" not in text:
         return False
     strong_powered_markers = (
-        "electric", "électrique", "electrique", "pneumatic", "pneumatique",
+        "electric", "electrique", "pneumatic", "pneumatique",
         "brushless", "sans brosse", "ak-v", "ak v", "ak-i", "ak i", "ak duo",
     )
     return not any(marker in text for marker in strong_powered_markers)
@@ -55,10 +67,10 @@ def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
 def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> str:
     """Return PRODUCT, BUNDLE, ACCESSORY, USED, PROFESSIONAL or IRRELEVANT.
 
-    The classifier is deliberately deterministic and auditable. ``target_terms``
-    contains aliases for the core product being compared. The same classifier is
-    used for Google market offers and AliExpress supplier listings so economics
-    are calculated against like-for-like market buckets.
+    The same deterministic taxonomy is used for Google market offers and
+    AliExpress supplier listings. For tufting, translated titles are matched by
+    family semantics (tuft/touff + device evidence), not just exact English
+    aliases, so legitimate French listings stay comparable.
     """
     text = _norm(title)
     seller_text = _norm(seller)
@@ -71,24 +83,31 @@ def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> s
     if any(h in text for h in PRO_HINTS):
         return "PROFESSIONAL"
 
+    tufting_device_match = _is_tufting_device_offer(text, target_terms)
+
     has_target = any(t in text for t in target)
     if not has_target:
         for term in target:
-            words = [w for w in re.findall(r"[a-zà-ÿ0-9]+", term) if len(w) >= 4]
+            words = [w for w in re.findall(r"[a-z0-9]+", term) if len(w) >= 4]
             if words and all(w in text for w in words):
                 has_target = True
                 break
+    has_target = has_target or tufting_device_match
 
-    # Accessory-heavy titles often mention the parent product for compatibility
-    # or SEO (e.g. "tufting gun ... cotton 400g"). Keep those in ACCESSORY so
-    # they remain discoverable in the tufting universe without contaminating
-    # machine pricing/economics.
-    if any(h in text for h in ACCESSORY_HINTS) and not any(h in text for h in BUNDLE_HINTS):
+    # Consumables/accessories remain discoverable in the universe, but should
+    # never contaminate machine economics merely because the parent product name
+    # appears in the title for compatibility/SEO.
+    has_accessory_hint = any(h in text for h in ACCESSORY_HINTS)
+    has_bundle_hint = any(h in text for h in BUNDLE_HINTS)
+    if has_accessory_hint and not has_bundle_hint:
         return "ACCESSORY"
+
+    # Bundle markers are meaningful only after we have established that the
+    # listing belongs to the requested product family.
+    if has_target and has_bundle_hint:
+        return "BUNDLE"
     if not has_target:
         return "IRRELEVANT"
-    if any(h in text for h in BUNDLE_HINTS):
-        return "BUNDLE"
     return "PRODUCT"
 
 
