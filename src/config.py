@@ -22,6 +22,18 @@ class AliExpressConfig:
 
 
 @dataclass(frozen=True)
+class DataForSEOConfig:
+    login: str = ""
+    password: str = ""
+    base_url: str = "https://api.dataforseo.com"
+    timeout_seconds: float = 30.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.login and self.password)
+
+
+@dataclass(frozen=True)
 class DropPilotRules:
     price_multiplier: float
     min_margin_pct: float
@@ -51,6 +63,7 @@ class AppConfig:
     aliexpress: AliExpressConfig
     rules: DropPilotRules
     server: ServerConfig
+    dataforseo: DataForSEOConfig = field(default_factory=DataForSEOConfig)
 
 
 def _env(key: str, default: str | None = None) -> str:
@@ -99,5 +112,11 @@ def load_config(env_path: str | Path | None = None) -> AppConfig:
             cache_ttl_search=int(_env("CACHE_TTL_SEARCH", "3600")),
             cache_ttl_product=int(_env("CACHE_TTL_PRODUCT", "21600")),
             cache_ttl_shipping=int(_env("CACHE_TTL_SHIPPING", "86400")),
+        ),
+        dataforseo=DataForSEOConfig(
+            login=_env("DATAFORSEO_LOGIN", ""),
+            password=_env("DATAFORSEO_PASSWORD", ""),
+            base_url=_env("DATAFORSEO_BASE_URL", "https://api.dataforseo.com"),
+            timeout_seconds=float(_env("DATAFORSEO_TIMEOUT_SECONDS", "30")),
         ),
     )
