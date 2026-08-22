@@ -12,10 +12,12 @@ import structlog
 
 from .candidate_economics import economics_for_candidate, rank_candidate_economics
 from .dataforseo_client import DataForSEOClient, DataForSEOError, extract_shopping_items
+from .google_aliexpress_discovery import discover_from_serps, google_discovery_queries
 from .market_analysis import analyze_serps
 from .offer_classifier import summarize_classified_offers
 from .opportunity_sourcing import qualify_relevant_candidates, search_relevant_candidates
 from .server import _get_client, _get_config, mcp
+from .sourcing_relevance import is_relevant_search_item
 
 log = structlog.get_logger(__name__)
 
@@ -112,6 +114,34 @@ async def _fetch_market_serps(
     return cleaned, serps
 
 
+async def _discover_aliexpress_via_google(
+    *,
+    target_terms: list[str],
+    country_code: str,
+) -> tuple[list[str], list[dict[str, Any]], float]:
+    """Discover AliExpress item IDs with Google when DS text search has no recall."""
+    client = await _get_dataforseo_client()
+    queries = google_discovery_queries(target_terms)
+    serps: list[dict[str, Any]] = []
+    for query in queries:
+        serp = await client.google_serp_live(
+            query,
+            country_code=country_code,
+            language_code=None,
+            device="desktop",
+            depth=30,
+        )
+        serps.append(serp)
+
+    discovered = discover_from_serps(serps)
+    relevant = [
+        item for item in discovered
+        if is_relevant_search_item(item, target_terms)
+    ]
+    cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
+    return queries, relevant, cost
+
+
 @mcp.tool
 async def analyze_google_competition(
     keywords: list[str],
@@ -187,11 +217,12 @@ async def analyze_product_opportunity(
     max_aliexpress_results: int = 30,
     depth: int = 50,
 ) -> dict[str, Any]:
-    """End-to-end market pricing + relevance-first AliExpress economics.
+    """End-to-end market pricing + AliExpress economics.
 
-    AliExpress sourcing expands aliases, filters title relevance before costly
-    detail/freight calls, and treats missing ratings as UNKNOWN rather than 0.
-    `text.search.score` is used as a rating fallback when available.
+    Primary discovery uses the official DS text search. When it produces no
+    relevant candidates, the tool uses DataForSEO Google SERPs to discover
+    indexed AliExpress item URLs, extracts their numeric product IDs, then
+    qualifies those products through official product.get/freight.query calls.
     """
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
@@ -228,6 +259,21 @@ async def analyze_product_opportunity(
             country_code=country_code,
             max_results=max_aliexpress_results,
         )
+
+        discovery_mode = "aliexpress_ds_text_search"
+        google_discovery_queries_used: list[str] = []
+        google_discovery_cost = 0.0
+        if not relevant_items:
+            google_discovery_queries_used, google_items, google_discovery_cost = (
+                await _discover_aliexpress_via_google(
+                    target_terms=target_terms,
+                    country_code=country_code,
+                )
+            )
+            if google_items:
+                discovery_mode = "google_serp_aliexpress_ids"
+                relevant_items = google_items[:max_aliexpress_results]
+
         qualified, qualification_diagnostics = await qualify_relevant_candidates(
             ae_client,
             relevant_items,
@@ -254,13 +300,16 @@ async def analyze_product_opportunity(
             "WATCH" if best else "NO_QUALIFYING_SUPPLIER"
         )
 
+        market_cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
         return {
             "status": status,
             "country_code": country_code.upper(),
             "market_keywords": cleaned,
             "target_terms": target_terms,
             "aliexpress_query": aliexpress_query,
+            "discovery_mode": discovery_mode,
             "aliexpress_sourcing_queries": sourcing_queries,
+            "google_aliexpress_discovery_queries": google_discovery_queries_used,
             "market_category": category,
             "market_price_reference_eur": market_price,
             "market_pricing": price_bucket,
@@ -273,7 +322,9 @@ async def analyze_product_opportunity(
             "best_supplier": best,
             "suppliers": ranked[:10],
             "supplier_economics": ranked[:10],
-            "dataforseo_cost": round(sum(float(s.get("cost") or 0) for s in serps), 6),
+            "market_dataforseo_cost": market_cost,
+            "google_discovery_dataforseo_cost": google_discovery_cost,
+            "dataforseo_cost": round(market_cost + google_discovery_cost, 6),
         }
     except (DataForSEOError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
