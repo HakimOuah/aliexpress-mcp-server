@@ -18,11 +18,13 @@ def test_analyze_serps_aggregates_domains_ads_shopping_and_prices() -> None:
                         {
                             "type": "shopping_element",
                             "domain": "shop-a.fr",
+                            "seller": "Shop A",
                             "price": 79.0,
                         },
                         {
                             "type": "shopping_element",
                             "domain": "amazon.fr",
+                            "seller": "Amazon.fr - Seller",
                             "price": 129.0,
                         },
                     ],
@@ -40,8 +42,8 @@ def test_analyze_serps_aggregates_domains_ads_shopping_and_prices() -> None:
                     "items": [
                         {
                             "type": "popular_products_element",
-                            "domain": "shop-b.fr",
-                            "price": 199.0,
+                            "seller": "Cdiscount",
+                            "price": {"current": 199.0, "currency": "EUR"},
                         }
                     ],
                 },
@@ -58,6 +60,16 @@ def test_analyze_serps_aggregates_domains_ads_shopping_and_prices() -> None:
     assert result["top_organic_domains"][0] == {
         "domain": "competitor.fr",
         "appearances": 2,
+    }
+    assert result["unique_shopping_merchants"] == 3
+    assert result["shopping_merchants"][:3] == [
+        {"merchant": "Shop A", "appearances": 1},
+        {"merchant": "Amazon.fr - Seller", "appearances": 1},
+        {"merchant": "Cdiscount", "appearances": 1},
+    ]
+    assert {m["merchant"] for m in result["marketplace_merchants"]} == {
+        "Amazon.fr - Seller",
+        "Cdiscount",
     }
     assert result["shopping_price_eur"] == {
         "count": 3,
