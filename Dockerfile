@@ -23,12 +23,12 @@ COPY scripts/mcp_live_smoke_test.py ./scripts/
 
 EXPOSE 8080
 
-# Healthcheck: TCP probe on port 8080. Simpler and more reliable than
-# a GET on /mcp — we don't have to bet on how FastMCP v3 handles a
-# bare GET (it may return 200, 400, 405, ... hard to predict cleanly).
-# If the port is listening, the server process is alive.
+# Healthcheck: TCP probe on port 8080. Simpler and more reliable than a
+# bare MCP HTTP GET. If the port is listening, the server process is alive.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD python -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8080)); s.close()" \
     || exit 1
 
-CMD ["python", "-m", "src.server"]
+# Product Factory entrypoint: imports the proven AliExpress MCP tools and
+# registers the DataForSEO market-research tools on the same FastMCP server.
+CMD ["python", "-m", "src.product_factory_server"]
