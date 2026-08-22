@@ -7,8 +7,11 @@ import unicodedata
 from typing import Any
 
 _GENERIC_NOISE = {
-    "gun", "machine", "kit", "set", "tool", "tools", "product", "electric",
-    "electrique", "pour", "avec", "the", "and", "for",
+    "gun", "pistolet", "pistola", "machine", "kit", "set", "tool", "tools",
+    "product", "electric", "electrique", "pour", "avec", "the", "and", "for",
+}
+_DEVICE_HINTS = {
+    "gun", "pistolet", "pistola", "machine", "tufter", "touffeter",
 }
 
 
@@ -49,11 +52,35 @@ def relevance_terms(target_terms: list[str]) -> set[str]:
     return {t for t in tokens if t not in _GENERIC_NOISE}
 
 
+def _is_tufting_family(target_terms: list[str]) -> bool:
+    normalized = " ".join(_norm(t) for t in target_terms)
+    return "tuft" in normalized or "touff" in normalized
+
+
+def _has_tufting_anchor(title_norm: str) -> bool:
+    return "tuft" in title_norm or "touff" in title_norm
+
+
+def _has_device_hint(title_norm: str) -> bool:
+    title_tokens = set(title_norm.split())
+    if title_tokens & _DEVICE_HINTS:
+        return True
+    return "touffeter" in title_norm or "tufter" in title_norm
+
+
 def is_relevant_search_item(item: dict[str, Any], target_terms: list[str]) -> bool:
     title = str(item.get("title") or "")
     title_norm = _norm(title)
     if not title_norm:
         return False
+
+    # For tufting-machine sourcing, require BOTH the tufting domain anchor and
+    # an actual device indicator. This prevents generic spray/water/massage
+    # guns from passing merely because one alias contains "pistolet", and it
+    # also rejects yarn/fabric/accessories that mention tufting without being
+    # the machine itself.
+    if _is_tufting_family(target_terms):
+        return _has_tufting_anchor(title_norm) and _has_device_hint(title_norm)
 
     for term in target_terms:
         n = _norm(term)
