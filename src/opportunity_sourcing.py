@@ -2,10 +2,7 @@
 
 This path is deliberately more exploratory than the strict legacy normalizer.
 A supplier is rejected only when the evidence makes fulfillment unsafe or
-impossible (no saleable SKU, bad known quality, no shipping, extreme delay).
-Low order volume, heavier packages and moderately slow delivery are retained as
-WATCH signals so niche/high-ticket products are not discarded before economics
-can be calculated.
+impossible. Softer quality/logistics concerns remain WATCH signals.
 """
 
 from __future__ import annotations
@@ -127,13 +124,7 @@ async def qualify_relevant_candidates(
     hard_max_delivery_days: int = 30,
     max_delivery_days: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return fulfillment-viable candidates plus qualification diagnostics.
-
-    Supplier quality thresholds are intentionally split between hard failures and
-    WATCH signals. When ``target_terms`` are supplied, the full product title is
-    also classified before SKU selection so BUNDLE listings can select a bundle
-    SKU instead of the cheapest accessory/device-only variant.
-    """
+    """Return fulfillment-viable candidates plus qualification diagnostics."""
     if max_delivery_days is not None:
         preferred_max_delivery_days = max_delivery_days
 
@@ -211,23 +202,29 @@ def _sku_semantics(sku: SkuRef) -> str:
     text = _sku_text(sku)
     if not text:
         return "UNKNOWN"
-
-    # Explicit contents beat generic SET/NO labels. Example from the live tufting
-    # catalog: "EU 220V with Trimmer" is a real bundle, while "EU 220V Trimmer"
-    # is the trimmer alone.
     if any(hint in text for hint in _SKU_EXPLICIT_BUNDLE_HINTS):
         return "BUNDLE"
-
     if _OPAQUE_BUNDLE_RE.search(text):
         return "OPAQUE"
-
     if _sku_looks_accessory_only(sku):
         return "ACCESSORY"
-
     if any(hint in text for hint in _SKU_DEVICE_HINTS):
         return "PRODUCT"
-
     return "UNKNOWN"
+
+
+def _sku_candidate_record(sku: SkuRef, semantics: str) -> dict[str, Any]:
+    """Serialize one saleable SKU for an agent/vision review work queue."""
+    return {
+        "sku_id": sku.sku_id,
+        "offer_sale_price_eur": round(sku.offer_sale_price_eur, 2),
+        "sku_price_eur": round(sku.sku_price_eur, 2),
+        "currency": sku.currency_code,
+        "stock": sku.available_stock,
+        "properties": dict(sku.sku_properties),
+        "sku_image_url": sku.sku_image_url,
+        "semantics": semantics,
+    }
 
 
 def _select_reference_sku(
@@ -238,9 +235,7 @@ def _select_reference_sku(
     """Pick a saleable SKU that matches the listing's commercial category.
 
     For BUNDLE listings, explicit bundle variants are preferred. Opaque labels
-    such as ``SET D`` or ``NO.2`` are retained as WATCH-only evidence, while a
-    device-only/accessory-only SKU is marked as a category mismatch. For normal
-    product listings the previous cheapest-device-like behavior is preserved.
+    remain reviewable instead of being scored as confirmed bundles.
     """
     skus = [
         sku
@@ -254,7 +249,11 @@ def _select_reference_sku(
         and sku.offer_sale_price_eur > 0
     ]
     if not skus:
-        return None, {"saleable_sku_count": 0}, []
+        return None, {
+            "saleable_sku_count": 0,
+            "saleable_sku_candidates": [],
+            "requires_visual_sku_review": False,
+        }, []
 
     semantics = {sku.sku_id: _sku_semantics(sku) for sku in skus}
     warnings: list[str] = []
@@ -302,6 +301,12 @@ def _select_reference_sku(
 
     chosen = min(pool, key=lambda sku: sku.offer_sale_price_eur)
     selected_semantics = semantics[chosen.sku_id]
+    saleable_candidates = [
+        _sku_candidate_record(sku, semantics[sku.sku_id])
+        for sku in sorted(skus, key=lambda row: row.offer_sale_price_eur)
+    ]
+    requires_visual_review = expected_category == "BUNDLE" and bundle_status == "OPAQUE"
+
     metadata = {
         "saleable_sku_count": len(skus),
         "device_like_sku_count": sum(
@@ -317,6 +322,8 @@ def _select_reference_sku(
         "selected_sku_semantics": selected_semantics,
         "selected_sku_image_url": chosen.sku_image_url,
         "bundle_configuration_status": bundle_status,
+        "requires_visual_sku_review": requires_visual_review,
+        "saleable_sku_candidates": saleable_candidates,
         "saleable_price_min_eur": round(min(s.offer_sale_price_eur for s in skus), 2),
         "saleable_price_max_eur": round(max(s.offer_sale_price_eur for s in skus), 2),
     }
