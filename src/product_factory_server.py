@@ -12,8 +12,9 @@ import structlog
 
 from .dataforseo_client import DataForSEOClient, DataForSEOError, extract_shopping_items
 from .market_analysis import analyze_serps
-from .normalizer import normalize_search_results
+from .normalizer import diagnose_search_results, normalize_search_results
 from .offer_classifier import summarize_classified_offers
+from .opportunity_diagnostics import summarize_filter_failures
 from .opportunity_engine import economics_for_product, rank_supplier_economics
 from .server import _get_client, _get_config, mcp
 
@@ -193,10 +194,9 @@ async def analyze_product_opportunity(
 ) -> dict[str, Any]:
     """End-to-end market pricing + AliExpress landed-cost/margin analysis.
 
-    Uses classified Google product results to choose the market median for a
-    comparable offer category, then sources qualifying AliExpress products,
-    calculates landed cost and gross margin after VAT, and ranks suppliers.
-    This is the economic core used before a final Go/No-Go scoring layer.
+    When no AliExpress result qualifies, the response automatically includes
+    a full filter diagnostic so the agent can distinguish a bad niche from
+    thresholds that are simply too strict for the current catalogue.
     """
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
@@ -208,6 +208,7 @@ async def analyze_product_opportunity(
             market_keywords, country_code=country_code, language_code=None,
             device="desktop", depth=depth,
         )
+        competition_summary = analyze_serps(serps)
         offers: list[dict[str, Any]] = []
         for serp in serps:
             offers.extend(extract_shopping_items(serp))
@@ -219,7 +220,9 @@ async def analyze_product_opportunity(
                 "status": "INSUFFICIENT_MARKET_PRICING",
                 "market_category": category,
                 "market": market,
+                "competition_summary": competition_summary,
                 "suppliers": [],
+                "supplier_economics": [],
             }
 
         ae_client = await _get_client()
@@ -248,6 +251,29 @@ async def analyze_product_opportunity(
         status = "GO_CANDIDATE" if best and best["economics_verdict"] == "GO" else (
             "WATCH" if best else "NO_QUALIFYING_SUPPLIER"
         )
+
+        qualification_diagnostics: dict[str, Any] | None = None
+        if not products and raw_items:
+            diagnostics = await diagnose_search_results(
+                client=ae_client,
+                raw_items=raw_items,
+                target_country=country_code,
+            )
+            diagnostic_rows = [
+                {
+                    "product_id": d.product_id,
+                    "title": d.title,
+                    "failed_filters": d.failed_filters,
+                    "passed_filters": d.passed_filters,
+                    "offer_sale_price_eur": d.offer_sale_price_eur,
+                    "rating": d.rating,
+                    "order_count": d.order_count,
+                }
+                for d in diagnostics
+            ]
+            qualification_diagnostics = summarize_filter_failures(diagnostic_rows)
+            qualification_diagnostics["candidates"] = diagnostic_rows
+
         return {
             "status": status,
             "country_code": country_code.upper(),
@@ -258,10 +284,13 @@ async def analyze_product_opportunity(
             "market_price_reference_eur": market_price,
             "market_pricing": price_bucket,
             "market_classification_counts": market.get("classification_counts", {}),
+            "competition_summary": competition_summary,
             "aliexpress_raw_count": len(raw_items),
             "aliexpress_qualified_count": len(products),
+            "qualification_diagnostics": qualification_diagnostics,
             "best_supplier": best,
             "suppliers": ranked[:10],
+            "supplier_economics": ranked[:10],
             "dataforseo_cost": round(sum(float(s.get("cost") or 0) for s in serps), 6),
         }
     except (DataForSEOError, ValueError) as exc:
