@@ -11,7 +11,12 @@ from typing import Any
 import structlog
 
 from .candidate_economics import economics_for_candidate, rank_candidate_economics
-from .dataforseo_client import DataForSEOClient, DataForSEOError, extract_shopping_items
+from .dataforseo_client import (
+    DataForSEOClient,
+    DataForSEOError,
+    DataForSEOUpstreamError,
+    extract_shopping_items,
+)
 from .google_aliexpress_discovery import discover_from_serps, google_discovery_queries
 from .market_analysis import analyze_serps
 from .offer_classifier import summarize_classified_offers
@@ -118,19 +123,44 @@ async def _discover_aliexpress_via_google(
     *,
     target_terms: list[str],
     country_code: str,
-) -> tuple[list[str], list[dict[str, Any]], float]:
-    """Discover AliExpress item IDs with Google when DS text search has no recall."""
+) -> tuple[list[str], list[dict[str, Any]], float, dict[str, Any]]:
+    """Discover AliExpress item IDs with Google when DS text search has no recall.
+
+    Every query is independent. After the DataForSEO client's bounded retry,
+    a query that still fails is recorded and skipped instead of aborting the
+    entire product-opportunity analysis.
+    """
     client = await _get_dataforseo_client()
     queries = google_discovery_queries(target_terms)
     serps: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
     for query in queries:
-        serp = await client.google_serp_live(
-            query,
-            country_code=country_code,
-            language_code=None,
-            device="desktop",
-            depth=30,
-        )
+        try:
+            serp = await client.google_serp_live(
+                query,
+                country_code=country_code,
+                language_code=None,
+                device="desktop",
+                depth=30,
+            )
+        except DataForSEOUpstreamError as exc:
+            error = {
+                "query": query,
+                "status_code": exc.status_code,
+                "status_message": exc.status_message,
+                "error": str(exc),
+                "retryable": exc.retryable,
+            }
+            errors.append(error)
+            log.warning(
+                "product_factory.google_aliexpress_discovery.query_failed",
+                query=query,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                error=str(exc),
+            )
+            continue
         serps.append(serp)
 
     discovered = discover_from_serps(serps)
@@ -139,7 +169,18 @@ async def _discover_aliexpress_via_google(
         if is_relevant_search_item(item, target_terms)
     ]
     cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
-    return queries, relevant, cost
+    diagnostics = {
+        "queries_total": len(queries),
+        "queries_succeeded": len(serps),
+        "queries_failed": len(errors),
+        "no_results_queries": sum(bool(s.get("no_results")) for s in serps),
+        "discovered_product_ids": len(discovered),
+        "relevant_product_ids": len(relevant),
+        "partial": bool(errors and serps),
+        "failed": bool(errors and not serps),
+        "errors": errors,
+    }
+    return queries, relevant, cost, diagnostics
 
 
 @mcp.tool
@@ -223,6 +264,8 @@ async def analyze_product_opportunity(
     relevant candidates, the tool uses DataForSEO Google SERPs to discover
     indexed AliExpress item URLs, extracts their numeric product IDs, then
     qualifies those products through official product.get/freight.query calls.
+    Transient discovery-query failures are returned as diagnostics and do not
+    discard successful queries.
     """
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
@@ -263,16 +306,24 @@ async def analyze_product_opportunity(
         discovery_mode = "aliexpress_ds_text_search"
         google_discovery_queries_used: list[str] = []
         google_discovery_cost = 0.0
+        google_discovery_diagnostics: dict[str, Any] | None = None
         if not relevant_items:
-            google_discovery_queries_used, google_items, google_discovery_cost = (
-                await _discover_aliexpress_via_google(
-                    target_terms=target_terms,
-                    country_code=country_code,
-                )
+            (
+                google_discovery_queries_used,
+                google_items,
+                google_discovery_cost,
+                google_discovery_diagnostics,
+            ) = await _discover_aliexpress_via_google(
+                target_terms=target_terms,
+                country_code=country_code,
             )
             if google_items:
                 discovery_mode = "google_serp_aliexpress_ids"
                 relevant_items = google_items[:max_aliexpress_results]
+            elif google_discovery_diagnostics.get("queries_failed", 0):
+                discovery_mode = "google_serp_aliexpress_inconclusive"
+            else:
+                discovery_mode = "google_serp_aliexpress_no_ids"
 
         qualified, qualification_diagnostics = await qualify_relevant_candidates(
             ae_client,
@@ -296,9 +347,14 @@ async def analyze_product_opportunity(
         ]
         ranked = rank_candidate_economics(economics)
         best = ranked[0] if ranked else None
-        status = "GO_CANDIDATE" if best and best["economics_verdict"] == "GO" else (
-            "WATCH" if best else "NO_QUALIFYING_SUPPLIER"
-        )
+        if best and best["economics_verdict"] == "GO":
+            status = "GO_CANDIDATE"
+        elif best:
+            status = "WATCH"
+        elif discovery_mode == "google_serp_aliexpress_inconclusive":
+            status = "SOURCING_INCONCLUSIVE"
+        else:
+            status = "NO_QUALIFYING_SUPPLIER"
 
         market_cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
         return {
@@ -310,6 +366,7 @@ async def analyze_product_opportunity(
             "discovery_mode": discovery_mode,
             "aliexpress_sourcing_queries": sourcing_queries,
             "google_aliexpress_discovery_queries": google_discovery_queries_used,
+            "google_aliexpress_discovery_diagnostics": google_discovery_diagnostics,
             "market_category": category,
             "market_price_reference_eur": market_price,
             "market_pricing": price_bucket,
