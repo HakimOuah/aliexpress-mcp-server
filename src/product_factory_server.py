@@ -10,12 +10,11 @@ from typing import Any
 
 import structlog
 
+from .candidate_economics import economics_for_candidate, rank_candidate_economics
 from .dataforseo_client import DataForSEOClient, DataForSEOError, extract_shopping_items
 from .market_analysis import analyze_serps
-from .normalizer import diagnose_search_results, normalize_search_results
 from .offer_classifier import summarize_classified_offers
-from .opportunity_diagnostics import summarize_filter_failures
-from .opportunity_engine import economics_for_product, rank_supplier_economics
+from .opportunity_sourcing import qualify_relevant_candidates, search_relevant_candidates
 from .server import _get_client, _get_config, mcp
 
 log = structlog.get_logger(__name__)
@@ -157,11 +156,7 @@ async def analyze_market_pricing(
     device: str = "desktop",
     depth: int = 50,
 ) -> dict[str, Any]:
-    """Classify Google product offers and calculate pricing by comparable type.
-
-    Categories are PRODUCT, BUNDLE, ACCESSORY, USED, PROFESSIONAL and
-    IRRELEVANT. `target_terms` are aliases for the core product.
-    """
+    """Classify Google product offers and calculate pricing by comparable type."""
     try:
         cleaned, serps = await _fetch_market_serps(
             keywords, country_code=country_code, language_code=language_code,
@@ -192,11 +187,11 @@ async def analyze_product_opportunity(
     max_aliexpress_results: int = 30,
     depth: int = 50,
 ) -> dict[str, Any]:
-    """End-to-end market pricing + AliExpress landed-cost/margin analysis.
+    """End-to-end market pricing + relevance-first AliExpress economics.
 
-    When no AliExpress result qualifies, the response automatically includes
-    a full filter diagnostic so the agent can distinguish a bad niche from
-    thresholds that are simply too strict for the current catalogue.
+    AliExpress sourcing expands aliases, filters title relevance before costly
+    detail/freight calls, and treats missing ratings as UNKNOWN rather than 0.
+    `text.search.score` is used as a rating fallback when available.
     """
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
@@ -226,53 +221,38 @@ async def analyze_product_opportunity(
             }
 
         ae_client = await _get_client()
-        raw_items = await ae_client.search_products(
-            query=aliexpress_query,
+        sourcing_queries, relevant_items, raw_pool_count = await search_relevant_candidates(
+            ae_client,
+            aliexpress_query=aliexpress_query,
+            target_terms=target_terms,
+            country_code=country_code,
             max_results=max_aliexpress_results,
-            target_country=country_code,
-            sort_by="orders",
         )
-        products = await normalize_search_results(
-            client=ae_client,
-            raw_items=raw_items,
-            target_country=country_code,
+        qualified, qualification_diagnostics = await qualify_relevant_candidates(
+            ae_client,
+            relevant_items,
+            country_code=country_code,
+            min_orders=cfg.rules.min_orders_pass,
+            min_rating=cfg.rules.min_rating_pass,
+            min_store_rating=cfg.rules.min_rating_watch,
+            min_product_cost_eur=25.0,
+            max_delivery_days=15,
         )
+
         economics = [
-            economics_for_product(
-                product,
+            economics_for_candidate(
+                candidate,
                 market_price_ttc=float(market_price),
                 country_code=country_code,
                 rules=cfg.rules,
             )
-            for product in products
+            for candidate in qualified
         ]
-        ranked = rank_supplier_economics(economics)
+        ranked = rank_candidate_economics(economics)
         best = ranked[0] if ranked else None
         status = "GO_CANDIDATE" if best and best["economics_verdict"] == "GO" else (
             "WATCH" if best else "NO_QUALIFYING_SUPPLIER"
         )
-
-        qualification_diagnostics: dict[str, Any] | None = None
-        if not products and raw_items:
-            diagnostics = await diagnose_search_results(
-                client=ae_client,
-                raw_items=raw_items,
-                target_country=country_code,
-            )
-            diagnostic_rows = [
-                {
-                    "product_id": d.product_id,
-                    "title": d.title,
-                    "failed_filters": d.failed_filters,
-                    "passed_filters": d.passed_filters,
-                    "offer_sale_price_eur": d.offer_sale_price_eur,
-                    "rating": d.rating,
-                    "order_count": d.order_count,
-                }
-                for d in diagnostics
-            ]
-            qualification_diagnostics = summarize_filter_failures(diagnostic_rows)
-            qualification_diagnostics["candidates"] = diagnostic_rows
 
         return {
             "status": status,
@@ -280,13 +260,15 @@ async def analyze_product_opportunity(
             "market_keywords": cleaned,
             "target_terms": target_terms,
             "aliexpress_query": aliexpress_query,
+            "aliexpress_sourcing_queries": sourcing_queries,
             "market_category": category,
             "market_price_reference_eur": market_price,
             "market_pricing": price_bucket,
             "market_classification_counts": market.get("classification_counts", {}),
             "competition_summary": competition_summary,
-            "aliexpress_raw_count": len(raw_items),
-            "aliexpress_qualified_count": len(products),
+            "aliexpress_raw_pool_count": raw_pool_count,
+            "aliexpress_relevant_count": len(relevant_items),
+            "aliexpress_qualified_count": len(qualified),
             "qualification_diagnostics": qualification_diagnostics,
             "best_supplier": best,
             "suppliers": ranked[:10],
