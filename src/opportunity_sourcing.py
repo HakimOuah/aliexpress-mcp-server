@@ -103,6 +103,7 @@ async def qualify_relevant_candidates(
     preferred_max_length_cm: int = 60,
     preferred_max_delivery_days: int = 15,
     hard_max_delivery_days: int = 30,
+    max_delivery_days: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Return fulfillment-viable candidates plus qualification diagnostics.
 
@@ -110,7 +111,13 @@ async def qualify_relevant_candidates(
     advisory. They create WATCH flags but do not kill a supplier. Known ratings
     below the WATCH floor, missing saleable SKU, unavailable shipping and very
     slow delivery remain hard failures.
+
+    `max_delivery_days` is a backward-compatible alias for
+    `preferred_max_delivery_days` used by earlier Product Factory callers.
     """
+    if max_delivery_days is not None:
+        preferred_max_delivery_days = max_delivery_days
+
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
     async def inspect(item: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +160,6 @@ async def qualify_relevant_candidates(
             {"warning": name, "count": count}
             for name, count in warning_counts.most_common()
         ],
-        # Backward-compatible alias used by earlier debug commands.
         "failure_counts": [
             {"filter": name, "count": count}
             for name, count in hard_counts.most_common()
@@ -182,13 +188,7 @@ def _sku_looks_accessory_only(sku: SkuRef) -> bool:
 def _select_reference_sku(
     raw_skus: list[dict[str, Any]],
 ) -> tuple[SkuRef | None, dict[str, Any], list[str]]:
-    """Pick the cheapest saleable device-like SKU, not the cheapest accessory.
-
-    AliExpress sellers sometimes attach €1-10 accessory variants to a high-ticket
-    listing. Those variants must never drive opportunity economics. If every SKU
-    looks accessory-like we keep the cheapest saleable SKU but mark the choice
-    uncertain so the supplier can only become WATCH pending exact-variant review.
-    """
+    """Pick the cheapest saleable device-like SKU, not the cheapest accessory."""
     skus = [
         sku
         for sku in (
