@@ -24,6 +24,22 @@ _MARKETPLACE_HINTS = (
     "carrefour.",
 )
 
+_MARKETPLACE_SELLER_HINTS = (
+    "amazon",
+    "cdiscount",
+    "manomano",
+    "fnac",
+    "ebay",
+    "aliexpress",
+    "temu",
+    "rakuten",
+    "etsy",
+    "leroy merlin",
+    "carrefour",
+    "kaufland",
+    "leboncoin",
+)
+
 
 def _domain(item: dict[str, Any]) -> str | None:
     domain = item.get("domain")
@@ -35,6 +51,14 @@ def _domain(item: dict[str, Any]) -> str | None:
         if host:
             return host.lower().removeprefix("www.")
     return None
+
+
+def _seller(item: dict[str, Any]) -> str | None:
+    value = item.get("seller") or item.get("source")
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split()).strip()
+    return value or None
 
 
 def _price(item: dict[str, Any]) -> float | None:
@@ -53,8 +77,10 @@ def analyze_serps(serps: list[dict[str, Any]]) -> dict[str, Any]:
     organic_domains: Counter[str] = Counter()
     paid_domains: Counter[str] = Counter()
     shopping_domains: Counter[str] = Counter()
+    shopping_merchants: Counter[str] = Counter()
     shopping_prices: list[float] = []
     marketplaces: Counter[str] = Counter()
+    marketplace_merchants: Counter[str] = Counter()
     item_types: Counter[str] = Counter()
     total_results_estimate = 0
     total_cost = 0.0
@@ -81,8 +107,11 @@ def analyze_serps(serps: list[dict[str, Any]]) -> dict[str, Any]:
 
         for item in extract_shopping_items(serp):
             domain = _domain(item)
+            seller = _seller(item)
             if domain:
                 shopping_domains[domain] += 1
+            if seller:
+                shopping_merchants[seller] += 1
             price = _price(item)
             if price is not None and price > 0:
                 shopping_prices.append(price)
@@ -93,6 +122,11 @@ def analyze_serps(serps: list[dict[str, Any]]) -> dict[str, Any]:
             marketplaces[domain] = (
                 organic_domains[domain] + paid_domains[domain] + shopping_domains[domain]
             )
+
+    for merchant, count in shopping_merchants.items():
+        merchant_lower = merchant.lower()
+        if any(hint in merchant_lower for hint in _MARKETPLACE_SELLER_HINTS):
+            marketplace_merchants[merchant] = count
 
     price_summary: dict[str, float | int | None]
     if shopping_prices:
@@ -110,9 +144,10 @@ def analyze_serps(serps: list[dict[str, Any]]) -> dict[str, Any]:
         "unique_organic_domains": len(organic_domains),
         "unique_paid_domains": len(paid_domains),
         "unique_shopping_domains": len(shopping_domains),
+        "unique_shopping_merchants": len(shopping_merchants),
         "paid_presence": bool(paid_domains),
-        "shopping_presence": bool(shopping_domains or shopping_prices),
-        "marketplace_presence": bool(marketplaces),
+        "shopping_presence": bool(shopping_domains or shopping_merchants or shopping_prices),
+        "marketplace_presence": bool(marketplaces or marketplace_merchants),
         "top_organic_domains": [
             {"domain": domain, "appearances": count}
             for domain, count in organic_domains.most_common(15)
@@ -125,9 +160,17 @@ def analyze_serps(serps: list[dict[str, Any]]) -> dict[str, Any]:
             {"domain": domain, "appearances": count}
             for domain, count in shopping_domains.most_common(15)
         ],
+        "shopping_merchants": [
+            {"merchant": merchant, "appearances": count}
+            for merchant, count in shopping_merchants.most_common(20)
+        ],
         "marketplaces": [
             {"domain": domain, "appearances": count}
             for domain, count in marketplaces.most_common()
+        ],
+        "marketplace_merchants": [
+            {"merchant": merchant, "appearances": count}
+            for merchant, count in marketplace_merchants.most_common()
         ],
         "shopping_price_eur": price_summary,
         "serp_item_types": dict(item_types),
