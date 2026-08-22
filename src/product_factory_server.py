@@ -203,25 +203,63 @@ def _build_category_matched_economics(
     country_code: str,
     rules: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compare every supplier with the market bucket that matches its offer.
+    """Compare suppliers only when their selected SKU matches the offer category.
 
-    The requested category determines the primary opportunity verdict. Suppliers
-    that are bundles/professional/etc. remain visible as alternates, but cannot
-    make a PRODUCT opportunity look attractive by borrowing PRODUCT pricing.
+    Listing titles can describe a full bundle while the cheapest SKU is a trimmer
+    alone, a gun alone or an opaque ``SET D``. BUNDLE economics are therefore
+    trusted only for an explicitly verified bundle SKU. Opaque variants remain
+    visible for image/manual review. A bundle-titled listing whose selected SKU
+    clearly represents a PRODUCT or ACCESSORY is refined to that SKU category.
     """
     primary_rows: list[dict[str, Any]] = []
     alternate_rows: list[dict[str, Any]] = []
     unpriced_rows: list[dict[str, Any]] = []
 
     for candidate in qualified:
-        supplier_category = classify_offer(
+        listing_category = str(candidate.get("listing_category") or "") or classify_offer(
             str(candidate.get("title") or ""),
             str(candidate.get("store") or ""),
             target_terms,
         )
+        sku_selection = candidate.get("sku_selection") or {}
+        sku_semantics = str(sku_selection.get("selected_sku_semantics") or "UNKNOWN")
+        bundle_status = sku_selection.get("bundle_configuration_status")
+
+        supplier_category = listing_category
         row = dict(candidate)
+        row["listing_category"] = listing_category
         row["supplier_category"] = supplier_category
         row["requested_market_category"] = requested_category
+        row["sku_semantics"] = sku_semantics
+
+        if listing_category == "BUNDLE":
+            if bundle_status == "OPAQUE":
+                row["comparison_status"] = "SKU_CONTENT_UNVERIFIED"
+                row["comparison_reason"] = (
+                    "bundle variant label is opaque; inspect sku_image_url before pricing"
+                )
+                row["comparison_confidence"] = "LOW"
+                unpriced_rows.append(row)
+                continue
+
+            if bundle_status == "MISMATCH":
+                if sku_semantics in {"PRODUCT", "ACCESSORY"}:
+                    supplier_category = sku_semantics
+                    row["supplier_category"] = supplier_category
+                    row["category_refinement"] = (
+                        f"BUNDLE_TITLE_TO_{supplier_category}_SKU"
+                    )
+                    row["comparison_confidence"] = "SKU_REFINED"
+                else:
+                    row["comparison_status"] = "SKU_CATEGORY_MISMATCH"
+                    row["comparison_reason"] = (
+                        "selected SKU does not prove the bundle described by the listing"
+                    )
+                    row["comparison_confidence"] = "LOW"
+                    unpriced_rows.append(row)
+                    continue
+            elif bundle_status == "VERIFIED":
+                row["comparison_confidence"] = "SKU_VERIFIED"
 
         if supplier_category in {"IRRELEVANT", "USED"}:
             row["comparison_status"] = "NOT_COMPARABLE"
@@ -340,12 +378,7 @@ async def analyze_product_opportunity(
     max_aliexpress_results: int = 30,
     depth: int = 50,
 ) -> dict[str, Any]:
-    """End-to-end market pricing + category-matched AliExpress economics.
-
-    Supplier offers are classified with the same market taxonomy as Google
-    offers. The requested category drives the final verdict; alternate supplier
-    categories are returned separately with their own category-specific pricing.
-    """
+    """End-to-end market pricing + category/SKU-matched AliExpress economics."""
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
         raise RuntimeError("market_category must be PRODUCT, BUNDLE, ACCESSORY or PROFESSIONAL")
@@ -409,6 +442,7 @@ async def analyze_product_opportunity(
             ae_client,
             relevant_items,
             country_code=country_code,
+            target_terms=target_terms,
             min_orders=cfg.rules.min_orders_pass,
             min_orders_watch=cfg.rules.min_orders_watch,
             min_rating=cfg.rules.min_rating_pass,
@@ -453,6 +487,11 @@ async def analyze_product_opportunity(
             "market_pricing": price_bucket,
             "market_pricing_by_category": market.get("pricing_by_category", {}),
             "market_classification_counts": market.get("classification_counts", {}),
+            "market_offer_deduplication": {
+                "raw_total_offers": market.get("raw_total_offers"),
+                "unique_total_offers": market.get("unique_total_offers"),
+                "duplicates_removed": market.get("duplicates_removed"),
+            },
             "competition_summary": competition_summary,
             "aliexpress_raw_pool_count": raw_pool_count,
             "aliexpress_relevant_count": len(relevant_items),

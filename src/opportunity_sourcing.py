@@ -11,6 +11,7 @@ can be calculated.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import Counter
 from typing import Any
 
@@ -23,7 +24,7 @@ from .normalizer import (
     _build_sku_ref,
     _build_store_info,
 )
-from .offer_classifier import ACCESSORY_HINTS
+from .offer_classifier import ACCESSORY_HINTS, classify_offer
 from .sourcing_relevance import build_sourcing_queries, dedupe_and_filter
 
 CONCURRENCY_LIMIT = 5
@@ -50,6 +51,24 @@ _SKU_DEVICE_HINTS = (
     "cut pile",
     "loop pile",
 )
+_SKU_EXPLICIT_BUNDLE_HINTS = (
+    "with trimmer",
+    "with fabric",
+    "with yarn",
+    "with cloth",
+    "avec tondeuse",
+    "avec trimmer",
+    "avec tissu",
+    "avec fil",
+    "full set",
+    "starter kit",
+    "bundle",
+    "combo",
+    "kit ",
+    " pack",
+)
+_OPAQUE_BUNDLE_RE = re.compile(r"\b(?:set\s*[a-z0-9]+|no\.?\s*\d+)\b", re.IGNORECASE)
+
 _WARNING_PENALTIES = {
     "rating_unknown": 8,
     "rating_watch": 12,
@@ -61,6 +80,8 @@ _WARNING_PENALTIES = {
     "length_over_preferred": 8,
     "delivery_slow": 15,
     "sku_accessory_semantics_uncertain": 15,
+    "bundle_sku_content_unverified": 25,
+    "bundle_sku_category_mismatch": 30,
 }
 
 
@@ -93,6 +114,7 @@ async def qualify_relevant_candidates(
     items: list[dict[str, Any]],
     *,
     country_code: str,
+    target_terms: list[str] | None = None,
     min_orders: int = 100,
     min_orders_watch: int = 50,
     min_rating: float = 4.3,
@@ -107,17 +129,15 @@ async def qualify_relevant_candidates(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Return fulfillment-viable candidates plus qualification diagnostics.
 
-    `min_orders`, preferred package limits and the preferred delivery window are
-    advisory. They create WATCH flags but do not kill a supplier. Known ratings
-    below the WATCH floor, missing saleable SKU, unavailable shipping and very
-    slow delivery remain hard failures.
-
-    `max_delivery_days` is a backward-compatible alias for
-    `preferred_max_delivery_days` used by earlier Product Factory callers.
+    Supplier quality thresholds are intentionally split between hard failures and
+    WATCH signals. When ``target_terms`` are supplied, the full product title is
+    also classified before SKU selection so BUNDLE listings can select a bundle
+    SKU instead of the cheapest accessory/device-only variant.
     """
     if max_delivery_days is not None:
         preferred_max_delivery_days = max_delivery_days
 
+    terms = target_terms or []
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
     async def inspect(item: dict[str, Any]) -> dict[str, Any]:
@@ -126,6 +146,7 @@ async def qualify_relevant_candidates(
                 client,
                 item,
                 country_code=country_code,
+                target_terms=terms,
                 min_orders=min_orders,
                 min_orders_watch=min_orders_watch,
                 min_rating=min_rating,
@@ -185,10 +206,42 @@ def _sku_looks_accessory_only(sku: SkuRef) -> bool:
     return accessory and not device
 
 
+def _sku_semantics(sku: SkuRef) -> str:
+    """Return BUNDLE, OPAQUE, PRODUCT, ACCESSORY or UNKNOWN for one SKU."""
+    text = _sku_text(sku)
+    if not text:
+        return "UNKNOWN"
+
+    # Explicit contents beat generic SET/NO labels. Example from the live tufting
+    # catalog: "EU 220V with Trimmer" is a real bundle, while "EU 220V Trimmer"
+    # is the trimmer alone.
+    if any(hint in text for hint in _SKU_EXPLICIT_BUNDLE_HINTS):
+        return "BUNDLE"
+
+    if _OPAQUE_BUNDLE_RE.search(text):
+        return "OPAQUE"
+
+    if _sku_looks_accessory_only(sku):
+        return "ACCESSORY"
+
+    if any(hint in text for hint in _SKU_DEVICE_HINTS):
+        return "PRODUCT"
+
+    return "UNKNOWN"
+
+
 def _select_reference_sku(
     raw_skus: list[dict[str, Any]],
+    *,
+    expected_category: str | None = None,
 ) -> tuple[SkuRef | None, dict[str, Any], list[str]]:
-    """Pick the cheapest saleable device-like SKU, not the cheapest accessory."""
+    """Pick a saleable SKU that matches the listing's commercial category.
+
+    For BUNDLE listings, explicit bundle variants are preferred. Opaque labels
+    such as ``SET D`` or ``NO.2`` are retained as WATCH-only evidence, while a
+    device-only/accessory-only SKU is marked as a category mismatch. For normal
+    product listings the previous cheapest-device-like behavior is preserved.
+    """
     skus = [
         sku
         for sku in (
@@ -203,23 +256,67 @@ def _select_reference_sku(
     if not skus:
         return None, {"saleable_sku_count": 0}, []
 
-    device_like = [sku for sku in skus if not _sku_looks_accessory_only(sku)]
+    semantics = {sku.sku_id: _sku_semantics(sku) for sku in skus}
     warnings: list[str] = []
-    if device_like:
-        pool = device_like
-        selection_reason = "cheapest_device_like_in_stock"
+    bundle_status: str | None = None
+
+    if expected_category == "BUNDLE":
+        explicit = [sku for sku in skus if semantics[sku.sku_id] == "BUNDLE"]
+        opaque = [sku for sku in skus if semantics[sku.sku_id] == "OPAQUE"]
+        product_only = [sku for sku in skus if semantics[sku.sku_id] == "PRODUCT"]
+        accessory_only = [sku for sku in skus if semantics[sku.sku_id] == "ACCESSORY"]
+
+        if explicit:
+            pool = explicit
+            selection_reason = "cheapest_verified_bundle_sku"
+            bundle_status = "VERIFIED"
+        elif opaque:
+            pool = opaque
+            selection_reason = "cheapest_opaque_bundle_sku"
+            bundle_status = "OPAQUE"
+            warnings.append("bundle_sku_content_unverified")
+        elif product_only:
+            pool = product_only
+            selection_reason = "fallback_product_sku_for_bundle_listing"
+            bundle_status = "MISMATCH"
+            warnings.append("bundle_sku_category_mismatch")
+        elif accessory_only:
+            pool = accessory_only
+            selection_reason = "fallback_accessory_sku_for_bundle_listing"
+            bundle_status = "MISMATCH"
+            warnings.append("bundle_sku_category_mismatch")
+        else:
+            pool = skus
+            selection_reason = "fallback_unknown_sku_for_bundle_listing"
+            bundle_status = "OPAQUE"
+            warnings.append("bundle_sku_content_unverified")
     else:
-        pool = skus
-        selection_reason = "fallback_cheapest_saleable_sku"
-        warnings.append("sku_accessory_semantics_uncertain")
+        device_like = [sku for sku in skus if not _sku_looks_accessory_only(sku)]
+        if device_like:
+            pool = device_like
+            selection_reason = "cheapest_device_like_in_stock"
+        else:
+            pool = skus
+            selection_reason = "fallback_cheapest_saleable_sku"
+            warnings.append("sku_accessory_semantics_uncertain")
 
     chosen = min(pool, key=lambda sku: sku.offer_sale_price_eur)
+    selected_semantics = semantics[chosen.sku_id]
     metadata = {
         "saleable_sku_count": len(skus),
-        "device_like_sku_count": len(device_like),
-        "excluded_accessory_sku_count": len(skus) - len(device_like),
+        "device_like_sku_count": sum(
+            semantics[sku.sku_id] in {"PRODUCT", "BUNDLE", "OPAQUE", "UNKNOWN"}
+            for sku in skus
+        ),
+        "excluded_accessory_sku_count": sum(
+            semantics[sku.sku_id] == "ACCESSORY" for sku in skus
+        ),
+        "sku_semantics_counts": dict(Counter(semantics.values())),
         "selection_reason": selection_reason,
         "selected_sku_properties": dict(chosen.sku_properties),
+        "selected_sku_semantics": selected_semantics,
+        "selected_sku_image_url": chosen.sku_image_url,
+        "bundle_configuration_status": bundle_status,
         "saleable_price_min_eur": round(min(s.offer_sale_price_eur for s in skus), 2),
         "saleable_price_max_eur": round(max(s.offer_sale_price_eur for s in skus), 2),
     }
@@ -236,6 +333,7 @@ async def _inspect_one(
     item: dict[str, Any],
     *,
     country_code: str,
+    target_terms: list[str],
     min_orders: int,
     min_orders_watch: int,
     min_rating: float,
@@ -248,7 +346,7 @@ async def _inspect_one(
     hard_max_delivery_days: int,
 ) -> dict[str, Any]:
     product_id = str(item.get("itemId") or "")
-    title = str(item.get("title") or "")
+    search_title = str(item.get("title") or "")
     hard_failures: list[str] = []
     warnings: list[str] = []
     passed: list[str] = ["title_relevance"]
@@ -258,7 +356,7 @@ async def _inspect_one(
     except IOPError as exc:
         return _diag(
             product_id=product_id,
-            title=title,
+            title=search_title,
             hard_failures=["product_get_failed"],
             warnings=warnings,
             passed=passed,
@@ -266,6 +364,7 @@ async def _inspect_one(
         )
 
     base = details.get("ae_item_base_info_dto") or {}
+    title = str(base.get("subject") or search_title)
     detail_rating = _parse_float(base.get("avg_evaluation_rating"))
     search_rating = _parse_float(item.get("score"))
     rating = detail_rating if detail_rating > 0 else search_rating
@@ -278,6 +377,11 @@ async def _inspect_one(
         item.get("orders")
     )
     store = _build_store_info(details.get("ae_store_info"))
+    listing_category = (
+        classify_offer(title, store.store_name, target_terms)
+        if target_terms
+        else None
+    )
 
     if rating <= 0:
         warnings.append("rating_unknown")
@@ -319,7 +423,8 @@ async def _inspect_one(
         raw_skus = []
 
     sku, sku_selection, sku_warnings = _select_reference_sku(
-        [raw for raw in raw_skus if isinstance(raw, dict)]
+        [raw for raw in raw_skus if isinstance(raw, dict)],
+        expected_category=listing_category,
     )
     warnings.extend(sku_warnings)
     if sku is None:
@@ -402,8 +507,10 @@ async def _inspect_one(
         candidate = {
             "product_id": product_id,
             "title": title,
-            "product_url": str(item.get("itemUrl") or ""),
+            "product_url": f"https://www.aliexpress.com/item/{product_id}.html",
+            "discovery_url": str(item.get("itemUrl") or ""),
             "store": store.store_name,
+            "listing_category": listing_category,
             "rating": rating if rating > 0 else None,
             "rating_source": rating_source,
             "orders": order_count,
@@ -414,6 +521,7 @@ async def _inspect_one(
             "ship_from_country": shipping.ship_from_country,
             "is_eu_warehouse": shipping.ship_from_country in EU_COUNTRIES,
             "sku_id": sku.sku_id,
+            "sku_image_url": sku.sku_image_url,
             "sku_selection": sku_selection,
             "package_weight_kg": package_weight_kg,
             "package_max_length_cm": package_max_length_cm,
@@ -425,6 +533,7 @@ async def _inspect_one(
     return {
         "product_id": product_id,
         "title": title,
+        "listing_category": listing_category,
         "rating": rating if rating > 0 else None,
         "rating_source": rating_source,
         "order_count": order_count,
