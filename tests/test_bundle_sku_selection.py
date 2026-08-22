@@ -41,7 +41,7 @@ def _rules():
 def test_bundle_selection_rejects_cheaper_trimmer_only_sku() -> None:
     chosen, meta, warnings = _select_reference_sku(
         [
-            _sku("1", 30.19, "EU 220V Trimmer"),
+            _sku("1", 30.19, "EU 220V Trimmer", image="https://img/trimmer.jpg"),
             _sku("2", 134.39, "EU 220V with Trimmer", image="https://img/bundle.jpg"),
             _sku("3", 152.69, "EU 220V with Trimmer"),
         ],
@@ -54,14 +54,19 @@ def test_bundle_selection_rejects_cheaper_trimmer_only_sku() -> None:
     assert meta["bundle_configuration_status"] == "VERIFIED"
     assert meta["selected_sku_semantics"] == "BUNDLE"
     assert meta["selected_sku_image_url"] == "https://img/bundle.jpg"
+    assert meta["requires_visual_sku_review"] is False
+    assert len(meta["saleable_sku_candidates"]) == 3
+    assert meta["saleable_sku_candidates"][0]["sku_id"] == "1"
+    assert meta["saleable_sku_candidates"][0]["sku_image_url"] == "https://img/trimmer.jpg"
+    assert meta["saleable_sku_candidates"][1]["sku_id"] == "2"
     assert warnings == []
 
 
-def test_opaque_set_is_not_treated_as_verified_bundle() -> None:
+def test_opaque_set_exposes_all_skus_for_visual_review() -> None:
     chosen, meta, warnings = _select_reference_sku(
         [
-            _sku("1", 85.69, "SET D"),
-            _sku("2", 110.99, "SET A"),
+            _sku("1", 85.69, "SET D", image="https://img/set-d.jpg"),
+            _sku("2", 110.99, "SET A", image="https://img/set-a.jpg"),
         ],
         expected_category="BUNDLE",
     )
@@ -70,6 +75,9 @@ def test_opaque_set_is_not_treated_as_verified_bundle() -> None:
     assert chosen.sku_id == "1"
     assert meta["bundle_configuration_status"] == "OPAQUE"
     assert meta["selected_sku_semantics"] == "OPAQUE"
+    assert meta["requires_visual_sku_review"] is True
+    assert [row["sku_id"] for row in meta["saleable_sku_candidates"]] == ["1", "2"]
+    assert meta["saleable_sku_candidates"][0]["sku_image_url"] == "https://img/set-d.jpg"
     assert "bundle_sku_content_unverified" in warnings
 
 
@@ -138,6 +146,17 @@ def test_opaque_bundle_is_returned_unpriced_for_review() -> None:
         "sku_selection": {
             "bundle_configuration_status": "OPAQUE",
             "selected_sku_semantics": "OPAQUE",
+            "requires_visual_sku_review": True,
+            "saleable_sku_candidates": [
+                {
+                    "sku_id": "1",
+                    "offer_sale_price_eur": 85.69,
+                    "stock": 2,
+                    "properties": {"Couleur": "SET D"},
+                    "sku_image_url": "https://img/set-d.jpg",
+                    "semantics": "OPAQUE",
+                }
+            ],
         },
     }
 
@@ -154,3 +173,4 @@ def test_opaque_bundle_is_returned_unpriced_for_review() -> None:
     assert alternate == []
     assert len(unpriced) == 1
     assert unpriced[0]["comparison_status"] == "SKU_CONTENT_UNVERIFIED"
+    assert unpriced[0]["sku_selection"]["requires_visual_sku_review"] is True
