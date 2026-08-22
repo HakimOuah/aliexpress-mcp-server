@@ -19,7 +19,7 @@ from .dataforseo_client import (
 )
 from .google_aliexpress_discovery import discover_from_serps, google_discovery_queries
 from .market_analysis import analyze_serps
-from .offer_classifier import summarize_classified_offers
+from .offer_classifier import classify_offer, summarize_classified_offers
 from .opportunity_sourcing import qualify_relevant_candidates, search_relevant_candidates
 from .server import _get_client, _get_config, mcp
 from .sourcing_relevance import is_relevant_search_item
@@ -183,6 +183,88 @@ async def _discover_aliexpress_via_google(
     return queries, relevant, cost, diagnostics
 
 
+def _category_market_price(
+    market: dict[str, Any],
+    category: str,
+) -> float | None:
+    bucket = market.get("pricing_by_category", {}).get(category) or {}
+    value = bucket.get("median")
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return None
+
+
+def _build_category_matched_economics(
+    qualified: list[dict[str, Any]],
+    *,
+    market: dict[str, Any],
+    target_terms: list[str],
+    requested_category: str,
+    country_code: str,
+    rules: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compare every supplier with the market bucket that matches its offer.
+
+    The requested category determines the primary opportunity verdict. Suppliers
+    that are bundles/professional/etc. remain visible as alternates, but cannot
+    make a PRODUCT opportunity look attractive by borrowing PRODUCT pricing.
+    """
+    primary_rows: list[dict[str, Any]] = []
+    alternate_rows: list[dict[str, Any]] = []
+    unpriced_rows: list[dict[str, Any]] = []
+
+    for candidate in qualified:
+        supplier_category = classify_offer(
+            str(candidate.get("title") or ""),
+            str(candidate.get("store") or ""),
+            target_terms,
+        )
+        row = dict(candidate)
+        row["supplier_category"] = supplier_category
+        row["requested_market_category"] = requested_category
+
+        if supplier_category in {"IRRELEVANT", "USED"}:
+            row["comparison_status"] = "NOT_COMPARABLE"
+            row["comparison_reason"] = (
+                "supplier offer is not comparable with the requested product family"
+            )
+            unpriced_rows.append(row)
+            continue
+
+        category_price = _category_market_price(market, supplier_category)
+        if category_price is None:
+            row["comparison_status"] = "NO_MARKET_PRICE_FOR_CATEGORY"
+            row["comparison_reason"] = (
+                f"no reliable market median for {supplier_category}"
+            )
+            unpriced_rows.append(row)
+            continue
+
+        row["comparison_status"] = "MATCHED"
+        row["market_price_category"] = supplier_category
+        row["comparison_scope"] = (
+            "REQUESTED_CATEGORY"
+            if supplier_category == requested_category
+            else "ALTERNATE_CATEGORY"
+        )
+        economics = economics_for_candidate(
+            row,
+            market_price_ttc=category_price,
+            country_code=country_code,
+            rules=rules,
+        )
+        if supplier_category == requested_category:
+            primary_rows.append(economics)
+        else:
+            alternate_rows.append(economics)
+
+    return (
+        rank_candidate_economics(primary_rows),
+        rank_candidate_economics(alternate_rows),
+        unpriced_rows,
+    )
+
+
 @mcp.tool
 async def analyze_google_competition(
     keywords: list[str],
@@ -258,14 +340,11 @@ async def analyze_product_opportunity(
     max_aliexpress_results: int = 30,
     depth: int = 50,
 ) -> dict[str, Any]:
-    """End-to-end market pricing + AliExpress economics.
+    """End-to-end market pricing + category-matched AliExpress economics.
 
-    Primary discovery uses the official DS text search. When it produces no
-    relevant candidates, the tool uses DataForSEO Google SERPs to discover
-    indexed AliExpress item URLs, extracts their numeric product IDs, then
-    qualifies those products through official product.get/freight.query calls.
-    Transient discovery-query failures are returned as diagnostics and do not
-    discard successful queries.
+    Supplier offers are classified with the same market taxonomy as Google
+    offers. The requested category drives the final verdict; alternate supplier
+    categories are returned separately with their own category-specific pricing.
     """
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
@@ -292,6 +371,7 @@ async def analyze_product_opportunity(
                 "competition_summary": competition_summary,
                 "suppliers": [],
                 "supplier_economics": [],
+                "alternate_category_suppliers": [],
             }
 
         ae_client = await _get_client()
@@ -330,22 +410,23 @@ async def analyze_product_opportunity(
             relevant_items,
             country_code=country_code,
             min_orders=cfg.rules.min_orders_pass,
+            min_orders_watch=cfg.rules.min_orders_watch,
             min_rating=cfg.rules.min_rating_pass,
+            min_rating_watch=cfg.rules.min_rating_watch,
             min_store_rating=cfg.rules.min_rating_watch,
             min_product_cost_eur=25.0,
-            max_delivery_days=15,
+            preferred_max_delivery_days=15,
+            hard_max_delivery_days=30,
         )
 
-        economics = [
-            economics_for_candidate(
-                candidate,
-                market_price_ttc=float(market_price),
-                country_code=country_code,
-                rules=cfg.rules,
-            )
-            for candidate in qualified
-        ]
-        ranked = rank_candidate_economics(economics)
+        ranked, alternate_ranked, unpriced_suppliers = _build_category_matched_economics(
+            qualified,
+            market=market,
+            target_terms=target_terms,
+            requested_category=category,
+            country_code=country_code,
+            rules=cfg.rules,
+        )
         best = ranked[0] if ranked else None
         if best and best["economics_verdict"] == "GO":
             status = "GO_CANDIDATE"
@@ -370,15 +451,21 @@ async def analyze_product_opportunity(
             "market_category": category,
             "market_price_reference_eur": market_price,
             "market_pricing": price_bucket,
+            "market_pricing_by_category": market.get("pricing_by_category", {}),
             "market_classification_counts": market.get("classification_counts", {}),
             "competition_summary": competition_summary,
             "aliexpress_raw_pool_count": raw_pool_count,
             "aliexpress_relevant_count": len(relevant_items),
             "aliexpress_qualified_count": len(qualified),
+            "requested_category_supplier_count": len(ranked),
+            "alternate_category_supplier_count": len(alternate_ranked),
+            "unpriced_or_noncomparable_supplier_count": len(unpriced_suppliers),
             "qualification_diagnostics": qualification_diagnostics,
             "best_supplier": best,
             "suppliers": ranked[:10],
             "supplier_economics": ranked[:10],
+            "alternate_category_suppliers": alternate_ranked[:10],
+            "unpriced_or_noncomparable_suppliers": unpriced_suppliers[:20],
             "market_dataforseo_cost": market_cost,
             "google_discovery_dataforseo_cost": google_discovery_cost,
             "dataforseo_cost": round(market_cost + google_discovery_cost, 6),
