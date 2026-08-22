@@ -11,8 +11,10 @@ from typing import Any
 
 USED_HINTS = ("occasion", "used", "seconde main", "second hand", "reconditionné", "refurbished")
 ACCESSORY_HINTS = (
-    "tondeuse", "trimmer", "rasoir", "cadre", "frame", "fil", "yarn", "toile",
-    "tissu", "cloth", "aiguille", "needle", "ciseaux", "scissors", "pièce", "spare",
+    "tondeuse", "trimmer", "rasoir", "cadre", "frame", "fil", "yarn", "thread",
+    "toile", "tissu", "cloth", "fabric", "aiguille", "needle", "ciseaux", "scissors",
+    "pièce", "spare", "cotton", "coton", "wool", "laine", "strand", "strands",
+    "brin", "brins", "threader", "enfileur", "backing", "glue", "colle",
 )
 BUNDLE_HINTS = ("kit", "starter", "démarrage", "set", "ensemble", "pack", "bundle")
 PRO_HINTS = ("professionnel", "professional", "industrial", "industriel", "pneumatic", "pneumatique")
@@ -71,15 +73,16 @@ def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> s
 
     has_target = any(t in text for t in target)
     if not has_target:
-        # Fuzzy fallback: all significant words from one alias are present.
         for term in target:
             words = [w for w in re.findall(r"[a-zà-ÿ0-9]+", term) if len(w) >= 4]
             if words and all(w in text for w in words):
                 has_target = True
                 break
 
-    # Accessories take priority when title is clearly an accessory even if it
-    # mentions the parent product for compatibility.
+    # Accessory-heavy titles often mention the parent product for compatibility
+    # or SEO (e.g. "tufting gun ... cotton 400g"). Keep those in ACCESSORY so
+    # they remain discoverable in the tufting universe without contaminating
+    # machine pricing/economics.
     if any(h in text for h in ACCESSORY_HINTS) and not any(h in text for h in BUNDLE_HINTS):
         return "ACCESSORY"
     if not has_target:
