@@ -60,8 +60,11 @@ async def search_google_serp(
     try:
         client = await _get_dataforseo_client()
         return await client.google_serp_live(
-            keyword, country_code=country_code, language_code=language_code,
-            device=device, depth=depth,
+            keyword,
+            country_code=country_code,
+            language_code=language_code,
+            device=device,
+            depth=depth,
         )
     except (DataForSEOError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
@@ -79,8 +82,11 @@ async def search_google_shopping(
     try:
         client = await _get_dataforseo_client()
         serp = await client.google_serp_live(
-            keyword, country_code=country_code, language_code=language_code,
-            device=device, depth=depth,
+            keyword,
+            country_code=country_code,
+            language_code=language_code,
+            device=device,
+            depth=depth,
         )
         items = extract_shopping_items(serp)
         return {
@@ -108,11 +114,15 @@ async def _fetch_market_serps(
         raise RuntimeError("keywords must contain at least one non-empty query")
     if len(cleaned) > 10:
         raise RuntimeError("keywords is capped at 10 queries per analysis")
+
     client = await _get_dataforseo_client()
     serps = [
         await client.google_serp_live(
-            keyword, country_code=country_code, language_code=language_code,
-            device=device, depth=depth,
+            keyword,
+            country_code=country_code,
+            language_code=language_code,
+            device=device,
+            depth=depth,
         )
         for keyword in cleaned
     ]
@@ -124,12 +134,7 @@ async def _discover_aliexpress_via_google(
     target_terms: list[str],
     country_code: str,
 ) -> tuple[list[str], list[dict[str, Any]], float, dict[str, Any]]:
-    """Discover AliExpress item IDs with Google when DS text search has no recall.
-
-    Every query is independent. After the DataForSEO client's bounded retry,
-    a query that still fails is recorded and skipped instead of aborting the
-    entire product-opportunity analysis.
-    """
+    """Discover AliExpress IDs through Google without letting one failed query abort the run."""
     client = await _get_dataforseo_client()
     queries = google_discovery_queries(target_terms)
     serps: list[dict[str, Any]] = []
@@ -164,10 +169,7 @@ async def _discover_aliexpress_via_google(
         serps.append(serp)
 
     discovered = discover_from_serps(serps)
-    relevant = [
-        item for item in discovered
-        if is_relevant_search_item(item, target_terms)
-    ]
+    relevant = [item for item in discovered if is_relevant_search_item(item, target_terms)]
     cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
     diagnostics = {
         "queries_total": len(queries),
@@ -183,10 +185,7 @@ async def _discover_aliexpress_via_google(
     return queries, relevant, cost, diagnostics
 
 
-def _category_market_price(
-    market: dict[str, Any],
-    category: str,
-) -> float | None:
+def _category_market_price(market: dict[str, Any], category: str) -> float | None:
     bucket = market.get("pricing_by_category", {}).get(category) or {}
     value = bucket.get("median")
     if isinstance(value, (int, float)) and value > 0:
@@ -203,14 +202,7 @@ def _build_category_matched_economics(
     country_code: str,
     rules: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compare suppliers only when their selected SKU matches the offer category.
-
-    Listing titles can describe a full bundle while the cheapest SKU is a trimmer
-    alone, a gun alone or an opaque ``SET D``. BUNDLE economics are therefore
-    trusted only for an explicitly verified bundle SKU. Opaque variants remain
-    visible for image/manual review. A bundle-titled listing whose selected SKU
-    clearly represents a PRODUCT or ACCESSORY is refined to that SKU category.
-    """
+    """Compare suppliers only when the selected SKU is comparable with its market bucket."""
     primary_rows: list[dict[str, Any]] = []
     alternate_rows: list[dict[str, Any]] = []
     unpriced_rows: list[dict[str, Any]] = []
@@ -246,9 +238,7 @@ def _build_category_matched_economics(
                 if sku_semantics in {"PRODUCT", "ACCESSORY"}:
                     supplier_category = sku_semantics
                     row["supplier_category"] = supplier_category
-                    row["category_refinement"] = (
-                        f"BUNDLE_TITLE_TO_{supplier_category}_SKU"
-                    )
+                    row["category_refinement"] = f"BUNDLE_TITLE_TO_{supplier_category}_SKU"
                     row["comparison_confidence"] = "SKU_REFINED"
                 else:
                     row["comparison_status"] = "SKU_CATEGORY_MISMATCH"
@@ -272,9 +262,7 @@ def _build_category_matched_economics(
         category_price = _category_market_price(market, supplier_category)
         if category_price is None:
             row["comparison_status"] = "NO_MARKET_PRICE_FOR_CATEGORY"
-            row["comparison_reason"] = (
-                f"no reliable market median for {supplier_category}"
-            )
+            row["comparison_reason"] = f"no reliable market median for {supplier_category}"
             unpriced_rows.append(row)
             continue
 
@@ -303,6 +291,83 @@ def _build_category_matched_economics(
     )
 
 
+def _supplier_verdict(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+    value = (
+        row.get("supplier_verdict")
+        or row.get("economics_verdict")
+        or row.get("unit_economics_verdict")
+    )
+    return str(value).upper() if value else None
+
+
+def _resolve_requested_category_status(
+    ranked: list[dict[str, Any]],
+    unpriced_suppliers: list[dict[str, Any]],
+    *,
+    requested_category: str,
+    discovery_mode: str,
+) -> str:
+    """Resolve the main status from the requested category only.
+
+    Alternate categories never upgrade the requested opportunity. In particular,
+    the existence of a NO_GO supplier must not produce WATCH merely because a
+    supplier row exists.
+    """
+    if ranked:
+        verdict = _supplier_verdict(ranked[0])
+        if verdict == "GO":
+            return "GO"
+        if verdict == "WATCH":
+            return "WATCH"
+        if verdict == "NO_GO":
+            return "NO_GO"
+        return "WATCH"
+
+    requested_unpriced = [
+        row
+        for row in unpriced_suppliers
+        if str(row.get("supplier_category") or row.get("listing_category") or "").upper()
+        == requested_category
+    ]
+    if any(
+        row.get("comparison_status")
+        in {"SKU_CONTENT_UNVERIFIED", "SKU_CATEGORY_MISMATCH", "NO_MARKET_PRICE_FOR_CATEGORY"}
+        for row in requested_unpriced
+    ):
+        return "SOURCING_INCONCLUSIVE"
+
+    if discovery_mode == "google_serp_aliexpress_inconclusive":
+        return "SOURCING_INCONCLUSIVE"
+    return "NO_QUALIFYING_SUPPLIER"
+
+
+def _build_sku_review_queue(unpriced_suppliers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return agent-friendly work items for opaque SKU configurations."""
+    queue: list[dict[str, Any]] = []
+    for row in unpriced_suppliers:
+        if row.get("comparison_status") != "SKU_CONTENT_UNVERIFIED":
+            continue
+        selection = row.get("sku_selection") or {}
+        queue.append(
+            {
+                "product_id": row.get("product_id"),
+                "title": row.get("title"),
+                "product_url": row.get("product_url"),
+                "listing_category": row.get("listing_category"),
+                "sku_id": row.get("sku_id"),
+                "sku_image_url": row.get("sku_image_url")
+                or selection.get("selected_sku_image_url"),
+                "sku_properties": selection.get("selected_sku_properties"),
+                "selected_sku_semantics": selection.get("selected_sku_semantics"),
+                "bundle_configuration_status": selection.get("bundle_configuration_status"),
+                "review_reason": row.get("comparison_reason"),
+            }
+        )
+    return queue
+
+
 @mcp.tool
 async def analyze_google_competition(
     keywords: list[str],
@@ -314,25 +379,30 @@ async def analyze_google_competition(
     """Analyze recurring competitors, Ads, Shopping merchants and pricing."""
     try:
         cleaned, serps = await _fetch_market_serps(
-            keywords, country_code=country_code, language_code=language_code,
-            device=device, depth=depth,
+            keywords,
+            country_code=country_code,
+            language_code=language_code,
+            device=device,
+            depth=depth,
         )
         analysis = analyze_serps(serps)
-        analysis.update({
-            "country_code": country_code.upper(),
-            "language_code": language_code,
-            "device": device,
-            "keywords": cleaned,
-            "query_results": [
-                {
-                    "keyword": keyword,
-                    "item_types": serp.get("item_types", []),
-                    "se_results_count": serp.get("se_results_count", 0),
-                    "cost": serp.get("cost"),
-                }
-                for keyword, serp in zip(cleaned, serps)
-            ],
-        })
+        analysis.update(
+            {
+                "country_code": country_code.upper(),
+                "language_code": language_code,
+                "device": device,
+                "keywords": cleaned,
+                "query_results": [
+                    {
+                        "keyword": keyword,
+                        "item_types": serp.get("item_types", []),
+                        "se_results_count": serp.get("se_results_count", 0),
+                        "cost": serp.get("cost"),
+                    }
+                    for keyword, serp in zip(cleaned, serps)
+                ],
+            }
+        )
         return analysis
     except (DataForSEOError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
@@ -350,19 +420,26 @@ async def analyze_market_pricing(
     """Classify Google product offers and calculate pricing by comparable type."""
     try:
         cleaned, serps = await _fetch_market_serps(
-            keywords, country_code=country_code, language_code=language_code,
-            device=device, depth=depth,
+            keywords,
+            country_code=country_code,
+            language_code=language_code,
+            device=device,
+            depth=depth,
         )
         offers: list[dict[str, Any]] = []
         for serp in serps:
             offers.extend(extract_shopping_items(serp))
         summary = summarize_classified_offers(offers, target_terms)
-        summary.update({
-            "keywords": cleaned,
-            "target_terms": target_terms,
-            "country_code": country_code.upper(),
-            "dataforseo_cost": round(sum(float(s.get("cost") or 0) for s in serps), 6),
-        })
+        summary.update(
+            {
+                "keywords": cleaned,
+                "target_terms": target_terms,
+                "country_code": country_code.upper(),
+                "dataforseo_cost": round(
+                    sum(float(s.get("cost") or 0) for s in serps), 6
+                ),
+            }
+        )
         return summary
     except (DataForSEOError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
@@ -381,13 +458,18 @@ async def analyze_product_opportunity(
     """End-to-end market pricing + category/SKU-matched AliExpress economics."""
     category = market_category.upper()
     if category not in {"PRODUCT", "BUNDLE", "ACCESSORY", "PROFESSIONAL"}:
-        raise RuntimeError("market_category must be PRODUCT, BUNDLE, ACCESSORY or PROFESSIONAL")
+        raise RuntimeError(
+            "market_category must be PRODUCT, BUNDLE, ACCESSORY or PROFESSIONAL"
+        )
 
     cfg = _get_config()
     try:
         cleaned, serps = await _fetch_market_serps(
-            market_keywords, country_code=country_code, language_code=None,
-            device="desktop", depth=depth,
+            market_keywords,
+            country_code=country_code,
+            language_code=None,
+            device="desktop",
+            depth=depth,
         )
         competition_summary = analyze_serps(serps)
         offers: list[dict[str, Any]] = []
@@ -405,6 +487,7 @@ async def analyze_product_opportunity(
                 "suppliers": [],
                 "supplier_economics": [],
                 "alternate_category_suppliers": [],
+                "sku_review_queue": [],
             }
 
         ae_client = await _get_client()
@@ -462,18 +545,19 @@ async def analyze_product_opportunity(
             rules=cfg.rules,
         )
         best = ranked[0] if ranked else None
-        if best and best["economics_verdict"] == "GO":
-            status = "GO_CANDIDATE"
-        elif best:
-            status = "WATCH"
-        elif discovery_mode == "google_serp_aliexpress_inconclusive":
-            status = "SOURCING_INCONCLUSIVE"
-        else:
-            status = "NO_QUALIFYING_SUPPLIER"
+        best_alternate = alternate_ranked[0] if alternate_ranked else None
+        status = _resolve_requested_category_status(
+            ranked,
+            unpriced_suppliers,
+            requested_category=category,
+            discovery_mode=discovery_mode,
+        )
+        sku_review_queue = _build_sku_review_queue(unpriced_suppliers)
 
         market_cost = round(sum(float(s.get("cost") or 0) for s in serps), 6)
         return {
             "status": status,
+            "requested_category_verdict": status,
             "country_code": country_code.upper(),
             "market_keywords": cleaned,
             "target_terms": target_terms,
@@ -501,10 +585,12 @@ async def analyze_product_opportunity(
             "unpriced_or_noncomparable_supplier_count": len(unpriced_suppliers),
             "qualification_diagnostics": qualification_diagnostics,
             "best_supplier": best,
+            "best_alternate_supplier": best_alternate,
             "suppliers": ranked[:10],
             "supplier_economics": ranked[:10],
             "alternate_category_suppliers": alternate_ranked[:10],
             "unpriced_or_noncomparable_suppliers": unpriced_suppliers[:20],
+            "sku_review_queue": sku_review_queue,
             "market_dataforseo_cost": market_cost,
             "google_discovery_dataforseo_cost": google_discovery_cost,
             "dataforseo_cost": round(market_cost + google_discovery_cost, 6),
