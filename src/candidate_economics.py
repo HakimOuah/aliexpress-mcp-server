@@ -28,20 +28,18 @@ def economics_for_candidate(
     margin = (gross_profit / revenue_ht * 100.0) if revenue_ht > 0 else 0.0
 
     if margin >= rules.min_margin_pct:
-        economics_verdict = "GO"
+        unit_economics_verdict = "GO"
     elif margin >= 25.0:
-        economics_verdict = "WATCH"
+        unit_economics_verdict = "WATCH"
     else:
-        economics_verdict = "NO_GO"
+        unit_economics_verdict = "NO_GO"
 
     quality_verdict = str(candidate.get("quality_verdict") or "WATCH")
-    if economics_verdict == "NO_GO":
+    if unit_economics_verdict == "NO_GO":
         supplier_verdict = "NO_GO"
-    elif economics_verdict == "GO" and quality_verdict == "PASS":
+    elif unit_economics_verdict == "GO" and quality_verdict == "PASS":
         supplier_verdict = "GO"
     else:
-        # Good economics with supplier-quality warnings, or borderline economics
-        # with otherwise good quality, both require human/agent review.
         supplier_verdict = "WATCH"
 
     row = dict(candidate)
@@ -51,8 +49,12 @@ def economics_for_candidate(
             "revenue_ht_eur": round(revenue_ht, 2),
             "gross_profit_eur": round(gross_profit, 2),
             "gross_margin_pct": round(margin, 1),
-            "economics_verdict": economics_verdict,
+            "unit_economics_verdict": unit_economics_verdict,
             "supplier_verdict": supplier_verdict,
+            # Backward-compatible field used by Product Factory status logic.
+            # It is intentionally conservative: a quality-WATCH supplier cannot
+            # become GO_CANDIDATE solely because the arithmetic margin is high.
+            "economics_verdict": supplier_verdict,
         }
     )
     return row
