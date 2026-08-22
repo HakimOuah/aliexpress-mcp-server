@@ -6,6 +6,8 @@ import re
 import unicodedata
 from typing import Any
 
+from .offer_classifier import classify_offer
+
 _GENERIC_NOISE = {
     "gun", "pistolet", "pistola", "machine", "kit", "set", "tool", "tools",
     "product", "electric", "electrique", "pour", "avec", "the", "and", "for",
@@ -93,8 +95,6 @@ def _looks_like_tufting_accessory(title_norm: str) -> bool:
     if not accessory_hits:
         return False
 
-    # A real machine can be sold as a bundle with accessories, so accessory
-    # words alone must not reject titles that clearly describe an actual device.
     strong_machine_markers = (
         "tufting gun",
         "tufting machine",
@@ -119,11 +119,14 @@ def is_relevant_search_item(item: dict[str, Any], target_terms: list[str]) -> bo
     if not title_norm:
         return False
 
-    # Tufting needs domain-specific evidence. Generic spray/water/massage guns
-    # are rejected, and accessory-only listings are rejected even when a poor
-    # machine translation happens to include "pistolet à touffeter".
     if _is_tufting_family(target_terms):
         if not (_has_tufting_anchor(title_norm) and _has_device_hint(title_norm)):
+            return False
+
+        # The general offer classifier catches accessory-led titles such as
+        # "Tufting Gun Needle Threader" even when the phrase "tufting gun"
+        # appears only as a compatibility reference.
+        if classify_offer(title, None, target_terms) == "ACCESSORY":
             return False
         if _looks_like_tufting_accessory(title_norm):
             return False
