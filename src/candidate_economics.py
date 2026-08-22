@@ -1,4 +1,4 @@
-"""Economics for relevance-first AliExpress candidate dictionaries."""
+"""Economics and combined supplier verdicts for opportunity candidates."""
 
 from __future__ import annotations
 
@@ -26,15 +26,35 @@ def economics_for_candidate(
     revenue_ht = market_price_ttc / (1.0 + vat)
     gross_profit = revenue_ht - landed_cost
     margin = (gross_profit / revenue_ht * 100.0) if revenue_ht > 0 else 0.0
-    verdict = "GO" if margin >= rules.min_margin_pct else ("WATCH" if margin >= 25 else "NO_GO")
+
+    if margin >= rules.min_margin_pct:
+        economics_verdict = "GO"
+    elif margin >= 25.0:
+        economics_verdict = "WATCH"
+    else:
+        economics_verdict = "NO_GO"
+
+    quality_verdict = str(candidate.get("quality_verdict") or "WATCH")
+    if economics_verdict == "NO_GO":
+        supplier_verdict = "NO_GO"
+    elif economics_verdict == "GO" and quality_verdict == "PASS":
+        supplier_verdict = "GO"
+    else:
+        # Good economics with supplier-quality warnings, or borderline economics
+        # with otherwise good quality, both require human/agent review.
+        supplier_verdict = "WATCH"
+
     row = dict(candidate)
-    row.update({
-        "market_price_ttc_eur": round(market_price_ttc, 2),
-        "revenue_ht_eur": round(revenue_ht, 2),
-        "gross_profit_eur": round(gross_profit, 2),
-        "gross_margin_pct": round(margin, 1),
-        "economics_verdict": verdict,
-    })
+    row.update(
+        {
+            "market_price_ttc_eur": round(market_price_ttc, 2),
+            "revenue_ht_eur": round(revenue_ht, 2),
+            "gross_profit_eur": round(gross_profit, 2),
+            "gross_margin_pct": round(margin, 1),
+            "economics_verdict": economics_verdict,
+            "supplier_verdict": supplier_verdict,
+        }
+    )
     return row
 
 
@@ -42,9 +62,11 @@ def rank_candidate_economics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     order = {"GO": 0, "WATCH": 1, "NO_GO": 2}
     return sorted(
         rows,
-        key=lambda r: (
-            order.get(str(r.get("economics_verdict")), 9),
-            -float(r.get("gross_margin_pct") or 0),
-            float(r.get("landed_cost_eur") or 999999),
+        key=lambda row: (
+            order.get(str(row.get("supplier_verdict")), 9),
+            -float(row.get("gross_margin_pct") or 0),
+            -float(row.get("quality_score") or 0),
+            -int(row.get("orders") or 0),
+            float(row.get("landed_cost_eur") or 999999),
         ),
     )
