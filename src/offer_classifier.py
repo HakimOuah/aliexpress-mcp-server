@@ -8,6 +8,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from statistics import median
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 USED_HINTS = ("occasion", "used", "seconde main", "second hand", "reconditionne", "refurbished")
@@ -65,13 +66,7 @@ def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
 
 
 def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> str:
-    """Return PRODUCT, BUNDLE, ACCESSORY, USED, PROFESSIONAL or IRRELEVANT.
-
-    The same deterministic taxonomy is used for Google market offers and
-    AliExpress supplier listings. For tufting, translated titles are matched by
-    family semantics (tuft/touff + device evidence), not just exact English
-    aliases, so legitimate French listings stay comparable.
-    """
+    """Return PRODUCT, BUNDLE, ACCESSORY, USED, PROFESSIONAL or IRRELEVANT."""
     text = _norm(title)
     seller_text = _norm(seller)
     target = [_norm(t) for t in target_terms if _norm(t)]
@@ -94,16 +89,10 @@ def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> s
                 break
     has_target = has_target or tufting_device_match
 
-    # Consumables/accessories remain discoverable in the universe, but should
-    # never contaminate machine economics merely because the parent product name
-    # appears in the title for compatibility/SEO.
     has_accessory_hint = any(h in text for h in ACCESSORY_HINTS)
     has_bundle_hint = any(h in text for h in BUNDLE_HINTS)
     if has_accessory_hint and not has_bundle_hint:
         return "ACCESSORY"
-
-    # Bundle markers are meaningful only after we have established that the
-    # listing belongs to the requested product family.
     if has_target and has_bundle_hint:
         return "BUNDLE"
     if not has_target:
@@ -126,13 +115,73 @@ def _percentile(values: list[float], p: float) -> float | None:
     return round(value, 2)
 
 
+def _price_value(item: dict[str, Any]) -> float | None:
+    raw = item.get("price")
+    if isinstance(raw, dict):
+        raw = raw.get("current") or raw.get("value")
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return None
+
+
+def _normalized_external_url(item: dict[str, Any]) -> str | None:
+    """Return a stable merchant URL when one exists, excluding Google tracking URLs."""
+    for key in ("product_url", "url", "link", "check_url", "shopping_url"):
+        value = item.get(key)
+        if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+            continue
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            continue
+        host = (parts.hostname or "").lower()
+        if not host or host.endswith("google.com") or host.endswith("google.fr"):
+            continue
+        path = re.sub(r"/+", "/", parts.path or "/")
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path.rstrip("/"), "", ""))
+    return None
+
+
+def _offer_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a conservative identity for de-duplicating repeated SERP observations.
+
+    Prefer a real merchant/product URL. When DataForSEO only exposes Google
+    tracking URLs, fall back to merchant + normalized title + displayed price.
+    That removes the same offer seen through several keywords without collapsing
+    different merchants or differently priced variants.
+    """
+    external_url = _normalized_external_url(item)
+    if external_url:
+        return ("url", external_url)
+
+    seller = item.get("seller") or item.get("source") or item.get("domain") or ""
+    title = _norm(item.get("title"))
+    price = _price_value(item)
+    rounded_price = round(price, 2) if price is not None else None
+    return ("fallback", _norm(seller), title, rounded_price)
+
+
+def dedupe_offers(offers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove repeated observations of the same market offer, preserving order."""
+    seen: set[tuple[Any, ...]] = set()
+    unique: list[dict[str, Any]] = []
+    for item in offers:
+        identity = _offer_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(item)
+    return unique
+
+
 def summarize_classified_offers(
     offers: list[dict[str, Any]], target_terms: list[str]
 ) -> dict[str, Any]:
+    unique_offers = dedupe_offers(offers)
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     merchant_counts: Counter[str] = Counter()
 
-    for item in offers:
+    for item in unique_offers:
         title = str(item.get("title") or "")
         seller = item.get("seller") or item.get("source")
         category = classify_offer(title, str(seller) if seller else None, target_terms)
@@ -144,13 +193,7 @@ def summarize_classified_offers(
 
     pricing: dict[str, Any] = {}
     for category, rows in buckets.items():
-        prices: list[float] = []
-        for row in rows:
-            raw = row.get("price")
-            if isinstance(raw, dict):
-                raw = raw.get("current") or raw.get("value")
-            if isinstance(raw, (int, float)) and raw > 0:
-                prices.append(float(raw))
+        prices = [price for row in rows if (price := _price_value(row)) is not None]
         pricing[category] = {
             "count": len(rows),
             "priced_count": len(prices),
@@ -162,7 +205,10 @@ def summarize_classified_offers(
         }
 
     return {
-        "total_offers": len(offers),
+        "total_offers": len(unique_offers),
+        "raw_total_offers": len(offers),
+        "unique_total_offers": len(unique_offers),
+        "duplicates_removed": len(offers) - len(unique_offers),
         "classification_counts": {k: len(v) for k, v in sorted(buckets.items())},
         "pricing_by_category": pricing,
         "top_merchants": [
