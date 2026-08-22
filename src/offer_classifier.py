@@ -1,4 +1,4 @@
-"""Classify Google product offers into comparable market buckets."""
+"""Classify Google and supplier offers into comparable market buckets."""
 
 from __future__ import annotations
 
@@ -24,12 +24,39 @@ def _norm(text: object) -> str:
     return s.strip()
 
 
+def _is_tufting_family(target_terms: list[str]) -> bool:
+    joined = " ".join(_norm(term) for term in target_terms)
+    return "tuft" in joined or "touff" in joined
+
+
+def _manual_tufting_mismatch(text: str, target_terms: list[str]) -> bool:
+    """Reject manual tufting tools when the requested opportunity is a gun/machine.
+
+    Manual punch-style tufting tools can be valid products in their own right, but
+    they are not price-comparable with electric/pneumatic tufting machines. If the
+    caller explicitly includes ``manual`` in the target aliases, they remain valid.
+    """
+    if not _is_tufting_family(target_terms):
+        return False
+    target_text = " ".join(_norm(term) for term in target_terms)
+    if "manual" in target_text or "manuel" in target_text:
+        return False
+    if "manual" not in text and "manuel" not in text:
+        return False
+    strong_powered_markers = (
+        "electric", "électrique", "electrique", "pneumatic", "pneumatique",
+        "brushless", "sans brosse", "ak-v", "ak v", "ak-i", "ak i", "ak duo",
+    )
+    return not any(marker in text for marker in strong_powered_markers)
+
+
 def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> str:
     """Return PRODUCT, BUNDLE, ACCESSORY, USED, PROFESSIONAL or IRRELEVANT.
 
-    The classifier is deliberately deterministic and auditable. `target_terms`
-    should contain the core product aliases (e.g. ["tufting gun", "pistolet tufting",
-    "machine tufting"]).
+    The classifier is deliberately deterministic and auditable. ``target_terms``
+    contains aliases for the core product being compared. The same classifier is
+    used for Google market offers and AliExpress supplier listings so economics
+    are calculated against like-for-like market buckets.
     """
     text = _norm(title)
     seller_text = _norm(seller)
@@ -37,6 +64,8 @@ def classify_offer(title: str, seller: str | None, target_terms: list[str]) -> s
 
     if any(h in text for h in USED_HINTS) or "leboncoin" in seller_text:
         return "USED"
+    if _manual_tufting_mismatch(text, target_terms):
+        return "IRRELEVANT"
     if any(h in text for h in PRO_HINTS):
         return "PROFESSIONAL"
 
